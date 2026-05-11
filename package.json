@@ -1,0 +1,39 @@
+{
+    "name": "@ar-io/solana-escrow-app",
+    "version": "0.1.0",
+    "private": true,
+    "license": "AGPL-3.0-or-later",
+    "type": "module",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/ar-io/ar-io-solana-escrow-app.git"
+    },
+    "description": "Web UI for the AR.IO ANT escrow program. Forked from ar-io-solana-registration-app — same wallet plumbing, repurposed for trustless multi-protocol ANT custody (deposit / claim / manage / lookup flows).",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc && vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@ar.io/sdk": "^3.0.0",
+        "@solana/wallet-adapter-base": "^0.9.0",
+        "@solana/wallet-adapter-react": "^0.15.0",
+        "@solana/wallet-adapter-react-ui": "^0.9.0",
+        "@solana/wallet-adapter-wallets": "^0.19.0",
+        "bs58": "^6.0.0",
+        "buffer": "^6.0.3",
+        "ethers": "^6.13.0",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0"
+    },
+    "devDependencies": {
+        "@types/react": "^18.2.0",
+        "@types/react-dom": "^18.2.0",
+        "@vitejs/plugin-react": "^4.0.0",
+        "typescript": "^5.3.0",
+        "vite": "^5.0.0",
+        "vite-plugin-node-polyfills": "^0.22.0",
+        "vite-plugin-pwa": "^1.2.0"
+    },
+    "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+}
