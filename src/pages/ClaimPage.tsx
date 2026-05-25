@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { useConnection } from '@solana/wallet-adapter-react';
+import { address } from '@solana/kit';
+import bs58 from 'bs58';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
@@ -9,8 +10,10 @@ import { EthereumWalletConnect } from '../components/EthereumWalletConnect.tsx';
 import {
   fetchEscrowState,
   fetchEscrowsByRecipient,
+  fetchTokenEscrowsByRecipient,
   fetchRawEscrowAccount,
   deserializeEscrowToken,
+  type TokenEscrowByRecipient,
   lookupArweaveModulus,
   parseArweaveRecipient,
   canonicalMessage,
@@ -19,20 +22,22 @@ import {
   canonicalMessageV2Preview,
   formatMarioToArio,
   buildEd25519SigverifyIx,
-  buildClaimAntArweaveAttestedIx,
-  buildClaimTokensArweaveAttestedIx,
-  buildClaimVaultArweaveAttestedIx,
-  buildVaultedTransferIx,
-  getNextVaultIdForOwner,
-  deriveVaultPdas,
-  deriveAtaForOwner,
-  ESCROW_PROGRAM_ID,
-  ESCROW_ANT_ACCOUNT_SIZE,
+  buildCreateAtaIdempotentIx,
+  getAtaForOwner,
+  sendInstructions,
   ESCROW_TOKEN_ACCOUNT_SIZE,
   type EscrowAntState,
   type EscrowTokenState,
   type EscrowNetwork,
 } from '../services/escrow-client.ts';
+import {
+  getAntEscrow,
+  getTokenEscrow,
+  getWalletSigner,
+  getEscrowProgramId,
+  getNetwork,
+  makeRpc,
+} from '../services/solana.ts';
 import {
   AttestorClient,
   base64UrlToBytes,
@@ -85,6 +90,9 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const [recipientEscrows, setRecipientEscrows] = useState<
     Array<{ antMint: string; state: EscrowAntState }>
   >([]);
+  const [recipientTokenEscrows, setRecipientTokenEscrows] = useState<
+    TokenEscrowByRecipient[]
+  >([]);
   const [recipientDiscoveryLoading, setRecipientDiscoveryLoading] = useState(false);
   const [recipientDiscoveryError, setRecipientDiscoveryError] = useState('');
   const [recipientDiscoveryDone, setRecipientDiscoveryDone] = useState(false);
@@ -94,13 +102,10 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const [claimMessage, setClaimMessage] = useState('');
   const [txSignature, setTxSignature] = useState('');
 
-  const { publicKey, sendTransaction } = useWallet();
-  const { connection } = useConnection();
+  const { publicKey, wallet } = useWallet();
 
-  // Determine network from the RPC URL
-  const network: EscrowNetwork = (
-    connection?.rpcEndpoint?.includes('devnet') ? 'solana-devnet' : 'solana-mainnet'
-  );
+  // Determine network from the configured RPC URL
+  const network: EscrowNetwork = getNetwork();
 
   // -------------------------------------------------------------------
   // Fetch escrow state when ANT mint changes
@@ -120,16 +125,25 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     setSignature(null);
 
     try {
-      // First try as an ANT mint (derive the PDA)
-      const state = await fetchEscrowState(connection, antMint);
+      const programId = getEscrowProgramId();
+      if (!programId) {
+        setEscrowError(
+          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
+        );
+        return;
+      }
+      const { rpc } = makeRpc();
+
+      // First try as an ANT mint (the SDK derives the PDA + decodes).
+      const state = await getAntEscrow({}).get(address(antMint));
       if (state) {
         setEscrowState(state);
         return;
       }
 
       // If not found as ANT, try fetching the address directly as a PDA
-      // (for token/vault escrows where the user pastes the PDA address)
-      const rawAccount = await fetchRawEscrowAccount(connection, antMint);
+      // (for token/vault escrows where the user pastes the PDA address).
+      const rawAccount = await fetchRawEscrowAccount(rpc, antMint, programId);
       if (rawAccount && rawAccount.size === ESCROW_TOKEN_ACCOUNT_SIZE) {
         const tState = deserializeEscrowToken(rawAccount.data);
         setTokenState(tState);
@@ -144,7 +158,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     } finally {
       setEscrowLoading(false);
     }
-  }, [antMint, connection]);
+  }, [antMint]);
 
   useEffect(() => {
     if (antMint && antMint.length >= 32) {
@@ -164,15 +178,18 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       setRecipientDiscoveryLoading(true);
       setRecipientDiscoveryError('');
       try {
+        const programId = getEscrowProgramId();
+        if (!programId) throw new Error('No escrow program configured.');
+        const { rpc } = makeRpc();
         const modulus = await lookupArweaveModulus(addr);
         const modulusBytes = parseArweaveRecipient(modulus);
-        const results = await fetchEscrowsByRecipient(
-          connection,
-          'arweave',
-          modulusBytes,
-        );
+        const [ants, tokens] = await Promise.all([
+          fetchEscrowsByRecipient(rpc, 'arweave', modulusBytes, programId),
+          fetchTokenEscrowsByRecipient(rpc, 'arweave', modulusBytes, programId),
+        ]);
         if (!cancelled) {
-          setRecipientEscrows(results);
+          setRecipientEscrows(ants);
+          setRecipientTokenEscrows(tokens);
           setRecipientDiscoveryDone(true);
         }
       } catch (e) {
@@ -187,7 +204,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       }
     })();
     return () => { cancelled = true; };
-  }, [arweaveAddress, connection]);
+  }, [arweaveAddress]);
 
   useEffect(() => {
     const addr = ethereumAddress;
@@ -204,13 +221,16 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         for (let i = 0; i < 20; i++) {
           addrBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
         }
-        const results = await fetchEscrowsByRecipient(
-          connection,
-          'ethereum',
-          addrBytes,
-        );
+        const programId = getEscrowProgramId();
+        if (!programId) throw new Error('No escrow program configured.');
+        const { rpc } = makeRpc();
+        const [ants, tokens] = await Promise.all([
+          fetchEscrowsByRecipient(rpc, 'ethereum', addrBytes, programId),
+          fetchTokenEscrowsByRecipient(rpc, 'ethereum', addrBytes, programId),
+        ]);
         if (!cancelled) {
-          setRecipientEscrows(results);
+          setRecipientEscrows(ants);
+          setRecipientTokenEscrows(tokens);
           setRecipientDiscoveryDone(true);
         }
       } catch (e) {
@@ -225,12 +245,13 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       }
     })();
     return () => { cancelled = true; };
-  }, [ethereumAddress, connection]);
+  }, [ethereumAddress]);
 
   // Reset discovery when source wallet disconnects
   useEffect(() => {
     if (!arweaveAddress && !ethereumAddress) {
       setRecipientEscrows([]);
+      setRecipientTokenEscrows([]);
       setRecipientDiscoveryDone(false);
       setRecipientDiscoveryError('');
     }
@@ -248,21 +269,19 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     if (escrowState) {
       return canonicalMessagePreview({
         network,
-        antMint,
-        claimant,
+        antMint: address(antMint),
+        claimant: address(claimant),
         nonce: escrowState.nonce,
-        recipientPubkey: escrowState.recipientPubkey,
       });
     }
     if (tokenState) {
       return canonicalMessageV2Preview({
         network,
-        type: tokenState.assetType,
+        assetType: tokenState.assetType,
         assetId: tokenState.assetId,
         amount: tokenState.amount,
-        claimant,
+        claimant: address(claimant),
         nonce: tokenState.nonce,
-        recipientPubkey: tokenState.recipientPubkey,
       });
     }
     return null;
@@ -300,19 +319,17 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       const messageBytes = escrowState
         ? canonicalMessage({
             network,
-            antMint,
-            claimant,
+            antMint: address(antMint),
+            claimant: address(claimant),
             nonce: escrowState.nonce,
-            recipientPubkey: modulusBytes,
           })
         : canonicalMessageV2({
             network,
-            type: tokenState!.assetType,
+            assetType: tokenState!.assetType,
             assetId: tokenState!.assetId,
             amount: tokenState!.amount,
-            claimant,
+            claimant: address(claimant),
             nonce: tokenState!.nonce,
-            recipientPubkey: modulusBytes,
           });
 
       // signMessage return shape varies by wallet:
@@ -350,26 +367,20 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     setSignError('');
 
     try {
-      // Ethereum: recipient_pubkey is the 20-byte address stored on-chain.
-      const ethRecipient = escrowState?.recipientPubkey
-        ?? tokenState?.recipientPubkey
-        ?? new Uint8Array(0);
       const messageBytes = escrowState
         ? canonicalMessage({
             network,
-            antMint,
-            claimant,
+            antMint: address(antMint),
+            claimant: address(claimant),
             nonce: escrowState.nonce,
-            recipientPubkey: ethRecipient,
           })
         : canonicalMessageV2({
             network,
-            type: tokenState!.assetType,
+            assetType: tokenState!.assetType,
             assetId: tokenState!.assetId,
             amount: tokenState!.amount,
-            claimant,
+            claimant: address(claimant),
             nonce: tokenState!.nonce,
-            recipientPubkey: ethRecipient,
           });
 
       // Use ethers to sign the message via the injected provider.
@@ -428,7 +439,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
 
       if (escrowState) {
         // --- ANT escrow claim ---
-        const freshState = await fetchEscrowState(connection, antMint);
+        const freshState = await getAntEscrow({}).get(address(antMint));
         if (!freshState) {
           throw new Error('Escrow no longer exists — it may have been cancelled or already claimed.');
         }
@@ -443,20 +454,17 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           );
         }
 
-        const { PublicKey, Transaction, SystemProgram } = await import(
-          '@solana/web3.js'
-        );
-        const escrowProgramId = new PublicKey(ESCROW_PROGRAM_ID);
-        const antMintPubkey = new PublicKey(antMint);
-        const [escrowPda] = PublicKey.findProgramAddressSync(
-          [Buffer.from('escrow_ant'), antMintPubkey.toBuffer()],
-          escrowProgramId,
-        );
-
-        const tx = new Transaction();
-
-        if (escrowState.recipientProtocol === 'arweave') {
-          // --- Attested Arweave path: POST to attestor → Ed25519 ix + claim_*_attested ix ---
+        let sig: string;
+        if (escrowState.recipientProtocol === 'ethereum') {
+          // Verified on-chain via secp256k1_recover — single self-contained ix.
+          setClaimMessage('Waiting for wallet approval...');
+          sig = await getAntEscrow({ adapter: wallet?.adapter }).claimEthereum({
+            antMint: address(antMint),
+            claimant: address(claimant),
+            signature,
+          });
+        } else {
+          // --- Attested Arweave path: attestor Ed25519 sigverify ix + claim ix ---
           setClaimMessage('Requesting Ed25519 attestation from the attestor service...');
           const attestation = await attestor!.attest({
             claimKind: 'ant',
@@ -469,78 +477,36 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           });
 
           setClaimMessage('Building claim transaction...');
-          const attestorPubkeyBytes = (await import('bs58')).default.decode(
-            attestation.attestorPubkeyBase58,
+          const ed25519Ix = buildEd25519SigverifyIx(
+            bs58.decode(attestation.attestorPubkeyBase58),
+            base64UrlToBytes(attestation.attestationSignatureBase64Url),
+            base64UrlToBytes(attestation.canonicalMessageBase64Url),
           );
-          const attestationSigBytes = base64UrlToBytes(
-            attestation.attestationSignatureBase64Url,
-          );
-          const messageBytes = base64UrlToBytes(
-            attestation.canonicalMessageBase64Url,
-          );
-
-          const ed25519Ix = await buildEd25519SigverifyIx(
-            attestorPubkeyBytes,
-            attestationSigBytes,
-            messageBytes,
-          );
-          const claimIx = await buildClaimAntArweaveAttestedIx({
-            escrowPda: escrowPda.toBase58(),
-            antMint,
-            claimant,
+          const claimIx = await getAntEscrow({ adapter: wallet?.adapter }).claimArweaveIx({
+            antMint: address(antMint),
+            claimant: address(claimant),
             depositor: freshState.depositor,
-            payer: publicKey.toBase58(),
             messageNonce: escrowState.nonce,
           });
-          tx.add(ed25519Ix);
-          tx.add(claimIx);
-        } else {
-          // --- Ethereum on-chain path (unchanged) ---
-          setClaimMessage('Building claim transaction...');
-          const { TransactionInstruction } = await import('@solana/web3.js');
-          const { sha256 } = await import('@noble/hashes/sha256');
-          const claimantPubkey = new PublicKey(claimant);
-          const depositorPubkey = new PublicKey(freshState.depositor);
-          const mplCoreProgramId = new PublicKey(
-            'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d',
-          );
-          const discriminator = sha256(
-            new TextEncoder().encode('global:claim_ant_ethereum'),
-          ).slice(0, 8);
-          const data = Buffer.alloc(8 + 32 + 65);
-          data.set(discriminator, 0);
-          data.set(escrowState.nonce, 8);
-          data.set(signature, 8 + 32);
 
-          tx.add(
-            new TransactionInstruction({
-              programId: escrowProgramId,
-              keys: [
-                { pubkey: escrowPda, isSigner: false, isWritable: true },
-                { pubkey: antMintPubkey, isSigner: false, isWritable: true },
-                { pubkey: claimantPubkey, isSigner: false, isWritable: false },
-                { pubkey: depositorPubkey, isSigner: false, isWritable: true },
-                { pubkey: publicKey, isSigner: true, isWritable: true },
-                { pubkey: mplCoreProgramId, isSigner: false, isWritable: false },
-                { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-              ],
-              data,
-            }),
+          setClaimMessage('Waiting for wallet approval...');
+          const { rpc, rpcSubscriptions } = makeRpc();
+          sig = await sendInstructions(
+            rpc,
+            rpcSubscriptions,
+            getWalletSigner(wallet?.adapter),
+            [ed25519Ix, claimIx],
           );
         }
-
-        setClaimMessage('Waiting for wallet approval...');
-        const sig = await sendTransaction(tx, connection);
-
-        setClaimMessage('Confirming transaction...');
-        await connection.confirmTransaction(sig, 'confirmed');
 
         setTxSignature(sig);
         setClaimStatus('success');
         setClaimMessage(`Claim confirmed! ANT ${antMint} has been released to ${claimant}.`);
       } else if (tokenState) {
         // --- Token/vault escrow claim ---
-        const rawAccount = await fetchRawEscrowAccount(connection, antMint);
+        const programId = getEscrowProgramId()!;
+        const { rpc, rpcSubscriptions } = makeRpc();
+        const rawAccount = await fetchRawEscrowAccount(rpc, antMint, programId);
         if (!rawAccount || rawAccount.size !== ESCROW_TOKEN_ACCOUNT_SIZE) {
           throw new Error('Escrow no longer exists — it may have been cancelled or already claimed.');
         }
@@ -556,36 +522,56 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           );
         }
 
-        const { PublicKey, Transaction, SystemProgram, TransactionInstruction } =
-          await import('@solana/web3.js');
-        const { sha256 } = await import('@noble/hashes/sha256');
+        const arioMint = freshToken.arioMint;
+        const claimantAddr = address(claimant);
+        // The user pastes the escrow PDA as the identifier for token/vault.
+        const escrowPda = address(antMint);
+        const claimantTokenAccount = await getAtaForOwner(claimantAddr, arioMint);
+        const escrowTokenAccount = await getAtaForOwner(escrowPda, arioMint);
+        const te = getTokenEscrow({ adapter: wallet?.adapter });
+        let sig: string;
 
-        const escrowProgramId = new PublicKey(ESCROW_PROGRAM_ID);
-        const claimantPubkey = new PublicKey(claimant);
-        const depositorPubkey = new PublicKey(freshToken.depositor);
-        const arioMint = new PublicKey(freshToken.arioMint);
-        const tokenProgram = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+        if (tokenState.recipientProtocol === 'ethereum') {
+          // Verified on-chain via secp256k1_recover. The SDK auto-creates
+          // the claimant ATA and, for active vaults, bundles the sibling
+          // ario_core::vaulted_transfer ix.
+          setClaimMessage('Waiting for wallet approval...');
+          if (tokenState.assetType === 'vault') {
+            const payerTokenAccount = await getAtaForOwner(
+              getWalletSigner(wallet?.adapter).address,
+              arioMint,
+            );
+            sig = await te.claimVaultEthereum({
+              depositor: freshToken.depositor,
+              assetId: freshToken.assetId,
+              claimant: claimantAddr,
+              claimantTokenAccount,
+              escrowTokenAccount,
+              payerTokenAccount,
+              signature,
+            });
+          } else {
+            sig = await te.claimTokensEthereum({
+              depositor: freshToken.depositor,
+              assetId: freshToken.assetId,
+              claimant: claimantAddr,
+              claimantTokenAccount,
+              escrowTokenAccount,
+              signature,
+            });
+          }
+        } else {
+          // --- Attested Arweave path ---
+          if (tokenState.assetType === 'vault') {
+            // The SDK's attested vault-claim ix isn't exposed for manual
+            // sigverify assembly (claimVaultArweave sends its own tx and
+            // can't accept a prepended Ed25519 ix). Tracked as an SDK
+            // follow-up; use an Ethereum recipient for vault escrows today.
+            throw new Error(
+              'Arweave vault claims are not yet supported (the SDK does not expose the attested vault-claim instruction for sigverify assembly). Use an Ethereum recipient, or claim once the SDK ships the attested-vault helper.',
+            );
+          }
 
-        // Use the PDA address the user pasted as the escrow PDA.
-        const escrowPda = new PublicKey(antMint);
-        const ataProgramId = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
-        const [escrowAta] = PublicKey.findProgramAddressSync(
-          [escrowPda.toBuffer(), tokenProgram.toBuffer(), arioMint.toBuffer()],
-          ataProgramId,
-        );
-        const [claimantAta] = PublicKey.findProgramAddressSync(
-          [claimantPubkey.toBuffer(), tokenProgram.toBuffer(), arioMint.toBuffer()],
-          ataProgramId,
-        );
-        const [payerAta] = PublicKey.findProgramAddressSync(
-          [publicKey.toBuffer(), tokenProgram.toBuffer(), arioMint.toBuffer()],
-          ataProgramId,
-        );
-
-        const tx = new Transaction();
-
-        if (tokenState.recipientProtocol === 'arweave') {
-          // --- Attested Arweave path for token / vault escrows ---
           setClaimMessage('Requesting Ed25519 attestation from the attestor service...');
           const attestation = await attestor!.attest({
             claimKind: tokenState.assetType,
@@ -599,124 +585,35 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           });
 
           setClaimMessage('Building claim transaction...');
-          const attestorPubkeyBytes = (await import('bs58')).default.decode(
-            attestation.attestorPubkeyBase58,
+          const ed25519Ix = buildEd25519SigverifyIx(
+            bs58.decode(attestation.attestorPubkeyBase58),
+            base64UrlToBytes(attestation.attestationSignatureBase64Url),
+            base64UrlToBytes(attestation.canonicalMessageBase64Url),
           );
-          const attestationSigBytes = base64UrlToBytes(
-            attestation.attestationSignatureBase64Url,
+          const signer = getWalletSigner(wallet?.adapter);
+          // The lower-level *Ix doesn't auto-create the claimant ATA — do it.
+          const createAtaIx = buildCreateAtaIdempotentIx(
+            signer.address,
+            claimantTokenAccount,
+            claimantAddr,
+            arioMint,
           );
-          const messageBytes = base64UrlToBytes(
-            attestation.canonicalMessageBase64Url,
-          );
+          const claimIx = await te.claimTokensArweaveIx({
+            depositor: freshToken.depositor,
+            assetId: freshToken.assetId,
+            claimant: claimantAddr,
+            claimantTokenAccount,
+            escrowTokenAccount,
+            messageNonce: tokenState.nonce,
+          });
 
-          const ed25519Ix = await buildEd25519SigverifyIx(
-            attestorPubkeyBytes,
-            attestationSigBytes,
-            messageBytes,
-          );
-          tx.add(ed25519Ix);
-
-          if (tokenState.assetType === 'vault') {
-            tx.add(
-              await buildClaimVaultArweaveAttestedIx({
-                escrowPda: escrowPda.toBase58(),
-                escrowTokenAccount: escrowAta.toBase58(),
-                claimantTokenAccount: claimantAta.toBase58(),
-                payerTokenAccount: payerAta.toBase58(),
-                claimant,
-                depositor: freshToken.depositor,
-                payer: publicKey.toBase58(),
-                messageNonce: tokenState.nonce,
-              }),
-            );
-            // Active-vault path: the on-chain claim_vault_*_attested
-            // releases tokens to payer_token_account, then introspects
-            // the tx for a sibling `ario_core::vaulted_transfer` ix
-            // that re-locks the same amount for the claimant. We
-            // bundle that sibling here. Expired vaults skip this path
-            // and just receive liquid tokens at claimant_token_account.
-            const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-            const remaining = tokenState.vaultEndTimestamp - nowSeconds;
-            if (remaining > 0n) {
-              setClaimMessage(
-                'Bundling sibling vaulted_transfer (active-vault path)...',
-              );
-              const nextId = await getNextVaultIdForOwner(connection, claimant);
-              const { vaultCounter, vault } = await deriveVaultPdas(
-                claimant,
-                nextId,
-              );
-              const vaultAta = await deriveAtaForOwner(
-                vault,
-                freshToken.arioMint,
-              );
-              tx.add(
-                await buildVaultedTransferIx({
-                  recipient: claimant,
-                  recipientVaultCounter: vaultCounter,
-                  vault,
-                  senderTokenAccount: payerAta.toBase58(),
-                  vaultTokenAccount: vaultAta,
-                  arioMint: freshToken.arioMint,
-                  sender: publicKey.toBase58(),
-                  amount: tokenState.amount,
-                  lockDurationSeconds: remaining,
-                  revocable: tokenState.vaultRevocable,
-                }),
-              );
-            }
-          } else {
-            tx.add(
-              await buildClaimTokensArweaveAttestedIx({
-                escrowPda: escrowPda.toBase58(),
-                escrowTokenAccount: escrowAta.toBase58(),
-                claimantTokenAccount: claimantAta.toBase58(),
-                claimant,
-                depositor: freshToken.depositor,
-                payer: publicKey.toBase58(),
-                messageNonce: tokenState.nonce,
-              }),
-            );
-          }
-        } else {
-          // --- Ethereum on-chain path (unchanged) ---
-          setClaimMessage('Building claim transaction...');
-          const instrName =
-            tokenState.assetType === 'vault'
-              ? 'claim_vault_ethereum'
-              : 'claim_tokens_ethereum';
-          const discriminator = sha256(
-            new TextEncoder().encode(`global:${instrName}`),
-          ).slice(0, 8);
-          const data = Buffer.alloc(8 + 32 + 65);
-          data.set(discriminator, 0);
-          data.set(tokenState.nonce, 8);
-          data.set(signature, 8 + 32);
-
-          tx.add(
-            new TransactionInstruction({
-              programId: escrowProgramId,
-              keys: [
-                { pubkey: escrowPda, isSigner: false, isWritable: true },
-                { pubkey: escrowAta, isSigner: false, isWritable: true },
-                { pubkey: claimantAta, isSigner: false, isWritable: true },
-                { pubkey: arioMint, isSigner: false, isWritable: false },
-                { pubkey: claimantPubkey, isSigner: false, isWritable: false },
-                { pubkey: depositorPubkey, isSigner: false, isWritable: true },
-                { pubkey: publicKey, isSigner: true, isWritable: true },
-                { pubkey: tokenProgram, isSigner: false, isWritable: false },
-                { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-              ],
-              data,
-            }),
-          );
+          setClaimMessage('Waiting for wallet approval...');
+          sig = await sendInstructions(rpc, rpcSubscriptions, signer, [
+            ed25519Ix,
+            createAtaIx,
+            claimIx,
+          ]);
         }
-
-        setClaimMessage('Waiting for wallet approval...');
-        const sig = await sendTransaction(tx, connection);
-
-        setClaimMessage('Confirming transaction...');
-        await connection.confirmTransaction(sig, 'confirmed');
 
         setTxSignature(sig);
         setClaimStatus('success');
@@ -744,8 +641,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     arweaveModulus,
     publicKey,
     antMint,
-    connection,
-    sendTransaction,
+    wallet,
     network,
   ]);
 
@@ -868,12 +764,13 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           {recipientDiscoveryError && (
             <p style={styles.discoveryWarning}>{recipientDiscoveryError}</p>
           )}
-          {recipientDiscoveryDone && !recipientDiscoveryError && recipientEscrows.length === 0 && (
+          {recipientDiscoveryDone && !recipientDiscoveryError &&
+            recipientEscrows.length === 0 && recipientTokenEscrows.length === 0 && (
             <p style={styles.hint}>
-              No escrows found for this wallet. If you have a claim link, paste the ANT mint above.
+              No escrows found for this wallet. If you have a claim link, paste the ANT mint or escrow address above.
             </p>
           )}
-          {recipientEscrows.length > 0 && (
+          {(recipientEscrows.length > 0 || recipientTokenEscrows.length > 0) && (
             <div style={styles.discoveryList}>
               <p style={styles.discoveryTitle}>Escrows addressed to you</p>
               {recipientEscrows.map((e) => (
@@ -896,6 +793,37 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
                     onClick={() => setAntMint(e.antMint)}
                   >
                     Claim this ANT
+                  </button>
+                </div>
+              ))}
+              {recipientTokenEscrows.map((e) => (
+                <div key={e.escrowPda} style={styles.discoveryCard}>
+                  <div style={styles.discoveryCardRow}>
+                    <span style={styles.discoveryCardLabel}>
+                      {e.state.assetType === 'vault' ? 'Vault' : 'Tokens'}
+                    </span>
+                    <code style={styles.discoveryCardValue}>
+                      {formatMarioToArio(e.state.amount)} ARIO
+                    </code>
+                  </div>
+                  <div style={styles.discoveryCardRow}>
+                    <span style={styles.discoveryCardLabel}>Escrow</span>
+                    <code style={styles.discoveryCardValue}>
+                      {e.escrowPda.slice(0, 12)}...{e.escrowPda.slice(-4)}
+                    </code>
+                  </div>
+                  <div style={styles.discoveryCardRow}>
+                    <span style={styles.discoveryCardLabel}>Depositor</span>
+                    <code style={styles.discoveryCardValue}>
+                      {e.state.depositor.slice(0, 8)}...{e.state.depositor.slice(-4)}
+                    </code>
+                  </div>
+                  <button
+                    type="button"
+                    style={styles.discoveryClaimButton}
+                    onClick={() => setAntMint(e.escrowPda)}
+                  >
+                    Claim {e.state.assetType === 'vault' ? 'this vault' : 'these tokens'}
                   </button>
                 </div>
               ))}

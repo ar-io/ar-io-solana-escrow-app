@@ -13,6 +13,13 @@ import { ClaimPage } from './pages/ClaimPage.tsx';
 import { ManagePage } from './pages/ManagePage.tsx';
 import { LookupPage } from './pages/LookupPage.tsx';
 import { AttestorHealthBanner } from './components/AttestorHealthBanner.tsx';
+import { ProgramConfigBanner } from './components/ProgramConfigBanner.tsx';
+import {
+  getEscrowProgramId,
+  setEscrowProgramId,
+  getArioMintOverride,
+  setArioMint,
+} from './services/solana.ts';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -110,6 +117,24 @@ export function App() {
   const wallets = useMemo(() => [], []);
   const { route, query } = useHashRoute();
 
+  const [programId, setProgramId] = useState(() => getEscrowProgramId() ?? '');
+  const [arioMint, setArioMintState] = useState(() => getArioMintOverride());
+
+  const handleProgramIdChange = (value: string) => {
+    const trimmed = value.trim();
+    setProgramId(trimmed);
+    setEscrowProgramId(trimmed);
+    // Reload so any open client picks up the new program id.
+    window.location.reload();
+  };
+
+  const handleArioMintChange = (value: string) => {
+    const trimmed = value.trim();
+    setArioMintState(trimmed);
+    setArioMint(trimmed);
+    window.location.reload();
+  };
+
   const handleRpcChange = (value: string) => {
     if (value === 'custom') {
       setShowCustom(true);
@@ -133,6 +158,7 @@ export function App() {
       <WalletProvider wallets={wallets}>
         <WalletModalProvider>
           <div style={styles.container}>
+            <ProgramConfigBanner />
             <AttestorHealthBanner />
             <header className="app-header" style={styles.header}>
               <a href="#/" style={styles.logoLink}>
@@ -211,6 +237,50 @@ export function App() {
                   style={styles.rpcInput}
                 />
               )}
+              <span style={styles.footerDot}>&middot;</span>
+              <input
+                type="text"
+                defaultValue={programId}
+                placeholder="escrow program ID"
+                title={
+                  'Escrow (ario-ant-escrow) program ID. Required — the SDK ships no ' +
+                  'escrow program for any public cluster, so point this at your deployment. ' +
+                  'Press Enter to apply (reloads).'
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter')
+                    handleProgramIdChange((e.target as HTMLInputElement).value);
+                }}
+                onBlur={(e) => {
+                  if (e.target.value.trim() !== programId)
+                    handleProgramIdChange(e.target.value);
+                }}
+                style={{
+                  ...styles.rpcInput,
+                  width: '180px',
+                  borderColor: programId ? brand.border : brand.warning,
+                }}
+              />
+              <span style={styles.footerDot}>&middot;</span>
+              <input
+                type="text"
+                defaultValue={arioMint}
+                placeholder="ARIO mint (optional)"
+                title={
+                  'ARIO SPL mint override for token/vault flows. Leave blank to ' +
+                  'use the network default (devnet/mainnet). Set this for a custom ' +
+                  'cluster whose ARIO mint differs. Press Enter to apply (reloads).'
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter')
+                    handleArioMintChange((e.target as HTMLInputElement).value);
+                }}
+                onBlur={(e) => {
+                  if (e.target.value.trim() !== arioMint)
+                    handleArioMintChange(e.target.value);
+                }}
+                style={{ ...styles.rpcInput, width: '150px' }}
+              />
             </footer>
           </div>
         </WalletModalProvider>

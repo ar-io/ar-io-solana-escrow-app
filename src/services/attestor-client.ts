@@ -1,10 +1,10 @@
 /**
  * HTTP client for the AR.IO escrow attestor service.
  *
- * Mirrors `EscrowAttestorClient` from `@ar.io/sdk/solana` but stays in
- * `@solana/web3.js` shape so it composes with the wallet-adapter
- * pipeline this app uses. Once the app migrates to `@solana/kit` we
- * can drop this and import the SDK helper directly.
+ * The `@ar.io/sdk/solana` package does not (yet) ship an attestor HTTP
+ * client, so this stays app-side. It is transport-only (fetch + bs58)
+ * and carries no `@solana/web3.js` dependency. If the SDK later exports
+ * an `EscrowAttestorClient`, this can be replaced by it.
  *
  * The attestor verifies Arweave RSA-PSS signatures off-chain and
  * re-signs the canonical claim message with Ed25519. The on-chain
