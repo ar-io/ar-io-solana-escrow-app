@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { useConnection } from '@solana/wallet-adapter-react';
 import { brand } from '../brand.js';
+import { getNetwork } from '../services/solana.ts';
 import {
   AttestorClient,
   type AttestorHealth,
@@ -32,14 +32,13 @@ interface State {
  * Renders nothing in the success path. Single-shot per page load.
  */
 export function AttestorHealthBanner() {
-  const { connection } = useConnection();
   const [state, setState] = useState<State | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const url = import.meta.env.VITE_ATTESTOR_URL as string | undefined;
-      const expectedNetwork = inferNetworkFromRpc(connection?.rpcEndpoint);
+      const expectedNetwork = getNetwork();
 
       if (!url) {
         // Localnet doesn't strictly need an attestor (devs may be
@@ -103,7 +102,7 @@ export function AttestorHealthBanner() {
     return () => {
       cancelled = true;
     };
-  }, [connection?.rpcEndpoint]);
+  }, []);
 
   if (!state || state.status === 'ok' || state.status === 'checking') {
     return null;
@@ -138,15 +137,6 @@ export function AttestorHealthBanner() {
       )}
     </div>
   );
-}
-
-function inferNetworkFromRpc(endpoint?: string): string {
-  if (!endpoint) return 'unknown';
-  if (endpoint.includes('devnet')) return 'solana-devnet';
-  if (endpoint.includes('localhost') || endpoint.includes('127.0.0.1')) {
-    return 'localnet';
-  }
-  return 'solana-mainnet';
 }
 
 const styles: Record<string, React.CSSProperties> = {

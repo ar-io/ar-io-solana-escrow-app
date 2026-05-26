@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { useConnection } from '@solana/wallet-adapter-react';
+import { address } from '@solana/kit';
 import { brand } from '../brand.js';
+import { makeRpc, getEscrowProgramId } from '../services/solana.ts';
 import {
   fetchEscrowState,
   fetchRawEscrowAccount,
@@ -36,8 +37,6 @@ export function LookupPage({ initialAntMint }: Props) {
   const [error, setError] = useState('');
   const [searched, setSearched] = useState(false);
 
-  const { connection } = useConnection();
-
   const handleLookup = useCallback(async () => {
     if (!antMint || antMint.length < 30) {
       setError('Enter a valid escrow identifier (ANT mint or PDA address, base58).');
@@ -50,8 +49,22 @@ export function LookupPage({ initialAntMint }: Props) {
     setSearched(true);
 
     try {
+      const programId = getEscrowProgramId();
+      if (!programId) {
+        setError(
+          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID).',
+        );
+        return;
+      }
+
+      const { rpc } = makeRpc();
+
       // First try as an ANT mint (derive the PDA)
-      const antState = await fetchEscrowState(connection, antMint);
+      const [antPda] = await getEscrowAntPDA(
+        address(antMint),
+        address(programId),
+      );
+      const antState = await fetchEscrowState(rpc, String(antPda), programId);
       if (antState) {
         setLookupResult({ kind: 'ant', state: antState });
         return;
@@ -59,7 +72,7 @@ export function LookupPage({ initialAntMint }: Props) {
 
       // If not found as ANT, try fetching the address directly as a PDA
       // (for token/vault escrows where the user pastes the PDA address)
-      const rawAccount = await fetchRawEscrowAccount(connection, antMint);
+      const rawAccount = await fetchRawEscrowAccount(rpc, antMint, programId);
       if (rawAccount) {
         if (rawAccount.size === ESCROW_TOKEN_ACCOUNT_SIZE) {
           const tokenState = deserializeEscrowToken(rawAccount.data);
@@ -68,7 +81,7 @@ export function LookupPage({ initialAntMint }: Props) {
         }
         if (rawAccount.size === ESCROW_ANT_ACCOUNT_SIZE) {
           // Unlikely path — a direct PDA lookup that is an ANT escrow
-          const antPdaState = await fetchEscrowState(connection, antMint);
+          const antPdaState = await fetchEscrowState(rpc, antMint, programId);
           if (antPdaState) {
             setLookupResult({ kind: 'ant', state: antPdaState });
             return;
@@ -84,7 +97,7 @@ export function LookupPage({ initialAntMint }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [antMint, connection]);
+  }, [antMint]);
 
   // Auto-fetch if an ANT mint was provided via query string
   useEffect(() => {

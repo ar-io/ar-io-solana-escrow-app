@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { useConnection } from '@solana/wallet-adapter-react';
+import { address } from '@solana/kit';
+import { sha256 } from '@noble/hashes/sha256';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
@@ -9,9 +10,10 @@ import {
   parseEthereumRecipient,
   isArweaveAddress,
   lookupArweaveModulus,
-  ESCROW_PROGRAM_ID,
-  ESCROW_VAULT_SEED,
+  getAtaForOwner,
+  bytesToHexLower,
 } from '../services/escrow-client.ts';
+import { getTokenEscrow, getEscrowProgramId, getArioMint } from '../services/solana.ts';
 
 /**
  * Deposit ARIO tokens into a time-locked vault escrow, addressed to an
@@ -28,13 +30,14 @@ export function DepositVaultPage() {
   const [status, setStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
   const [txSignature, setTxSignature] = useState('');
+  const [escrowPda, setEscrowPda] = useState('');
+  const [assetIdHex, setAssetIdHex] = useState('');
   const [arweaveLookup, setArweaveLookup] = useState<
     'idle' | 'loading' | 'success' | 'error'
   >('idle');
   const [arweaveLookupMessage, setArweaveLookupMessage] = useState('');
 
-  const { publicKey, sendTransaction } = useWallet();
-  const { connection } = useConnection();
+  const { publicKey, wallet } = useWallet();
 
   // Parse amount: user enters ARIO, we convert to mARIO (6 decimals)
   const parsedMario = (() => {
@@ -87,6 +90,12 @@ export function DepositVaultPage() {
     setStatusMessage('Preparing deposit transaction...');
 
     try {
+      if (!getEscrowProgramId()) {
+        throw new Error(
+          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
+        );
+      }
+
       // 1. Parse the recipient public key from user input
       let recipientPubkey: Uint8Array;
       try {
@@ -100,91 +109,43 @@ export function DepositVaultPage() {
         );
       }
 
-      const { PublicKey, TransactionInstruction, Transaction, SystemProgram } =
-        await import('@solana/web3.js');
-      const { sha256 } = await import('@noble/hashes/sha256');
-
-      const escrowProgramId = new PublicKey(ESCROW_PROGRAM_ID);
-
-      // Generate a unique asset_id for this deposit.
-      const nonce = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
-      const assetIdInput = `vault-escrow:${publicKey.toBase58()}:${nonce}`;
-      const assetId = sha256(new TextEncoder().encode(assetIdInput));
-
-      // Derive the escrow PDA: ["escrow_vault", depositor, asset_id]
-      const [escrowPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from(ESCROW_VAULT_SEED), publicKey.toBuffer(), Buffer.from(assetId)],
-        escrowProgramId,
+      // 2. Build + submit the deposit via the SDK (kit). The escrow client
+      //    derives the PDA, encodes the instruction, and confirms the tx.
+      const assetId = sha256(
+        new TextEncoder().encode(
+          `vault-escrow:${publicKey.toBase58()}:${crypto.randomUUID?.() ?? Date.now()}`,
+        ),
+      );
+      const arioMint = getArioMint();
+      const depositorTokenAccount = await getAtaForOwner(
+        address(publicKey.toBase58()),
+        arioMint,
       );
 
-      // ARIO mint address (mainnet)
-      const arioMint = new PublicKey('ARiotkVQiLCdng5y3Grf8XLfXJiAR4Dqfsrfcbq5Zo3');
-
-      // Token program
-      const tokenProgram = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-
-      // Derive depositor ATA
-      const [depositorAta] = PublicKey.findProgramAddressSync(
-        [publicKey.toBuffer(), tokenProgram.toBuffer(), arioMint.toBuffer()],
-        new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'),
-      );
-
-      // Derive escrow ATA
-      const [escrowAta] = PublicKey.findProgramAddressSync(
-        [escrowPda.toBuffer(), tokenProgram.toBuffer(), arioMint.toBuffer()],
-        new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'),
-      );
-
-      // 2. Encode instruction data
-      // Discriminator = sha256("global:deposit_vault")[..8]
-      const discriminator = sha256(
-        new TextEncoder().encode('global:deposit_vault'),
-      ).slice(0, 8);
-
-      // Data: discriminator(8) + asset_id(32) + amount(8) + lock_duration_seconds(8) + revocable(1) + protocol(1) + pubkey_len(4) + pubkey(N)
-      const data = Buffer.alloc(8 + 32 + 8 + 8 + 1 + 1 + 4 + recipientPubkey.length);
-      let offset = 0;
-      data.set(discriminator, offset); offset += 8;
-      data.set(assetId, offset); offset += 32;
-      // Write amount as u64 LE
-      const amountBuf = Buffer.alloc(8);
-      amountBuf.writeBigUInt64LE(parsedMario);
-      data.set(amountBuf, offset); offset += 8;
-      // Write lock duration as i64 LE
-      const lockBuf = Buffer.alloc(8);
-      lockBuf.writeBigInt64LE(lockDurationSeconds);
-      data.set(lockBuf, offset); offset += 8;
-      // Revocable flag
-      data.writeUInt8(revocable ? 1 : 0, offset); offset += 1;
-      // Protocol
-      data.writeUInt8(protocol === 'arweave' ? 0 : 1, offset); offset += 1;
-      data.writeUInt32LE(recipientPubkey.length, offset); offset += 4;
-      data.set(recipientPubkey, offset);
-
-      // 3. Build the instruction
-      const ix = new TransactionInstruction({
-        programId: escrowProgramId,
-        keys: [
-          { pubkey: escrowPda, isSigner: false, isWritable: true },
-          { pubkey: depositorAta, isSigner: false, isWritable: true },
-          { pubkey: escrowAta, isSigner: false, isWritable: true },
-          { pubkey: arioMint, isSigner: false, isWritable: false },
-          { pubkey: publicKey, isSigner: true, isWritable: true },
-          { pubkey: tokenProgram, isSigner: false, isWritable: false },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        ],
-        data,
+      setStatusMessage('Waiting for wallet approval...');
+      const escrow = getTokenEscrow({ adapter: wallet?.adapter });
+      const sig = await escrow.depositVault({
+        assetId,
+        amount: parsedMario,
+        arioMint,
+        lockDurationSeconds: lockDurationSeconds,
+        revocable: revocable,
+        depositorTokenAccount,
+        recipient: { protocol, publicKey: recipientPubkey },
       });
 
-      // 4. Send the transaction
-      setStatusMessage('Waiting for wallet approval...');
-      const tx = new Transaction().add(ix);
-      const sig = await sendTransaction(tx, connection);
-
-      setStatusMessage('Confirming transaction...');
-      await connection.confirmTransaction(sig, 'confirmed');
-
       setTxSignature(sig);
+
+      // Vault escrows are keyed by their on-chain PDA (derived from the
+      // depositor + a random assetId), NOT discoverable by mint. The
+      // recipient needs this PDA to claim, so surface it here.
+      const escrowPda = await getTokenEscrow().getVaultPda(
+        address(publicKey.toBase58()),
+        assetId,
+      );
+      setEscrowPda(String(escrowPda));
+      setAssetIdHex(bytesToHexLower(assetId));
+
       setStatus('success');
       setStatusMessage(
         `Deposit confirmed! ${amountInput} ARIO locked in vault escrow for ${lockDays} days.`,
@@ -198,7 +159,7 @@ export function DepositVaultPage() {
         setStatusMessage(`Deposit failed: ${msg}`);
       }
     }
-  }, [publicKey, parsedMario, recipientInput, protocol, amountInput, lockDays, lockDurationSeconds, revocable, connection, sendTransaction]);
+  }, [publicKey, parsedMario, recipientInput, protocol, amountInput, lockDays, lockDurationSeconds, revocable, wallet]);
 
   const canSubmit =
     solPubkey && parsedMario && validLockDays && recipientInput.length > 0 && status !== 'submitting';
@@ -360,6 +321,31 @@ export function DepositVaultPage() {
                   View on Explorer
                 </a>
               </p>
+            )}
+            {escrowPda && (
+              <div style={styles.pdaBox}>
+                <p style={styles.pdaHeading}>Escrow address (share with recipient)</p>
+                <p style={styles.pdaNote}>
+                  Send this escrow address to the recipient — they'll need it
+                  to claim. Token/vault escrows aren't discoverable by mint.
+                </p>
+                <div style={styles.pdaRow}>
+                  <code style={styles.pdaCode}>{escrowPda}</code>
+                  <button
+                    type="button"
+                    style={styles.copyButton}
+                    onClick={() => navigator.clipboard?.writeText(escrowPda)}
+                  >
+                    Copy
+                  </button>
+                </div>
+                {assetIdHex && (
+                  <>
+                    <p style={{ ...styles.pdaHeading, marginTop: '12px' }}>Asset ID</p>
+                    <code style={styles.pdaCode}>{assetIdHex}</code>
+                  </>
+                )}
+              </div>
             )}
           </div>
         ) : status === 'error' ? (
@@ -557,6 +543,55 @@ const styles: Record<string, React.CSSProperties> = {
   txLink: {
     fontSize: '13px',
     margin: '8px 0 0',
+  },
+  pdaBox: {
+    marginTop: '14px',
+    paddingTop: '14px',
+    borderTop: `1px solid ${brand.success}33`,
+  },
+  pdaHeading: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '12px',
+    fontWeight: 700,
+    color: brand.black,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.8px',
+    margin: '0 0 4px',
+  },
+  pdaNote: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '13px',
+    color: brand.textSecondary,
+    margin: '0 0 8px',
+  },
+  pdaRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'wrap' as const,
+  },
+  pdaCode: {
+    fontFamily: 'monospace',
+    fontSize: '13px',
+    color: brand.black,
+    background: brand.white,
+    border: `1px solid ${brand.border}`,
+    borderRadius: '8px',
+    padding: '8px 10px',
+    wordBreak: 'break-all' as const,
+    flex: 1,
+    minWidth: 0,
+  },
+  copyButton: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    padding: '8px 14px',
+    border: `1px solid ${brand.border}`,
+    borderRadius: '8px',
+    background: brand.white,
+    color: brand.black,
+    fontSize: '13px',
+    fontWeight: 600,
+    cursor: 'pointer',
   },
   errorBox: {
     padding: '14px 16px',

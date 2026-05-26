@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { useConnection } from '@solana/wallet-adapter-react';
+import { address } from '@solana/kit';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
@@ -9,8 +9,8 @@ import {
   parseEthereumRecipient,
   isArweaveAddress,
   lookupArweaveModulus,
-  ESCROW_PROGRAM_ID,
 } from '../services/escrow-client.ts';
+import { getAntEscrow, getEscrowProgramId } from '../services/solana.ts';
 
 /**
  * Depositor flow — lock one of your ANTs into escrow, addressed to an
@@ -33,8 +33,7 @@ export function DepositPage() {
   >('idle');
   const [arweaveLookupMessage, setArweaveLookupMessage] = useState('');
 
-  const { publicKey, sendTransaction } = useWallet();
-  const { connection } = useConnection();
+  const { publicKey, wallet } = useWallet();
 
   /**
    * When the Arweave recipient input changes, detect 43-character Arweave
@@ -79,6 +78,12 @@ export function DepositPage() {
     setStatusMessage('Preparing deposit transaction...');
 
     try {
+      if (!getEscrowProgramId()) {
+        throw new Error(
+          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
+        );
+      }
+
       // 1. Parse the recipient public key from user input
       let recipientPubkey: Uint8Array;
       try {
@@ -92,55 +97,14 @@ export function DepositPage() {
         );
       }
 
-      // 2. Derive the escrow PDA
-      const { PublicKey, TransactionInstruction, Transaction, SystemProgram } =
-        await import('@solana/web3.js');
-
-      const escrowProgramId = new PublicKey(ESCROW_PROGRAM_ID);
-      const antMintPubkey = new PublicKey(antMint);
-      const mplCoreProgramId = new PublicKey(
-        'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d',
-      );
-
-      const [escrowPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from('escrow_ant'), antMintPubkey.toBuffer()],
-        escrowProgramId,
-      );
-
-      // 3. Encode instruction data
-      //    Anchor discriminator (8 bytes) + u8 protocol + Vec<u8> pubkey
-      //    Discriminator = sha256("global:deposit_ant")[..8]
-      const { sha256 } = await import('@noble/hashes/sha256');
-      const discriminator = sha256(
-        new TextEncoder().encode('global:deposit_ant'),
-      ).slice(0, 8);
-
-      const data = Buffer.alloc(8 + 1 + 4 + recipientPubkey.length);
-      data.set(discriminator, 0);
-      data.writeUInt8(protocol === 'arweave' ? 0 : 1, 8);
-      data.writeUInt32LE(recipientPubkey.length, 9);
-      data.set(recipientPubkey, 13);
-
-      // 4. Build the instruction
-      const ix = new TransactionInstruction({
-        programId: escrowProgramId,
-        keys: [
-          { pubkey: escrowPda, isSigner: false, isWritable: true },
-          { pubkey: antMintPubkey, isSigner: false, isWritable: true },
-          { pubkey: publicKey, isSigner: true, isWritable: true },
-          { pubkey: mplCoreProgramId, isSigner: false, isWritable: false },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        ],
-        data,
-      });
-
-      // 5. Send the transaction
+      // 2. Build + submit the deposit via the SDK (kit). The escrow client
+      //    derives the PDA, encodes the instruction, and confirms the tx.
       setStatusMessage('Waiting for wallet approval...');
-      const tx = new Transaction().add(ix);
-      const sig = await sendTransaction(tx, connection);
-
-      setStatusMessage('Confirming transaction...');
-      await connection.confirmTransaction(sig, 'confirmed');
+      const escrow = getAntEscrow({ adapter: wallet?.adapter });
+      const sig = await escrow.deposit({
+        antMint: address(antMint),
+        recipient: { protocol, publicKey: recipientPubkey },
+      });
 
       setTxSignature(sig);
       setStatus('success');
@@ -155,7 +119,7 @@ export function DepositPage() {
         setStatusMessage(`Deposit failed: ${msg}`);
       }
     }
-  }, [publicKey, antMint, recipientInput, protocol, connection, sendTransaction]);
+  }, [publicKey, antMint, recipientInput, protocol, wallet]);
 
   const canSubmit =
     solPubkey && antMint.length > 30 && recipientInput.length > 0 && status !== 'submitting';
