@@ -52,7 +52,7 @@ export function LookupPage({ initialAntMint }: Props) {
       const programId = getEscrowProgramId();
       if (!programId) {
         setError(
-          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID).',
+          'No escrow program configured. Set the program ID in the menu (or VITE_ESCROW_PROGRAM_ID).',
         );
         return;
       }
@@ -121,7 +121,7 @@ export function LookupPage({ initialAntMint }: Props) {
 
   return (
     <div style={styles.wrap}>
-      <h1 style={styles.h1}>Escrow lookup</h1>
+      <h1 className="page-title" style={styles.h1}>Escrow lookup</h1>
       <p style={styles.lede}>
         Inspect the on-chain state of any active escrow. No wallet
         required.
@@ -130,7 +130,7 @@ export function LookupPage({ initialAntMint }: Props) {
       <div style={styles.searchRow}>
         <input
           type="text"
-          placeholder="ANT mint pubkey (base58)"
+          placeholder="ANT mint or escrow PDA (base58)"
           value={antMint}
           onChange={(e) => setAntMint(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') handleLookup(); }}
@@ -152,7 +152,7 @@ export function LookupPage({ initialAntMint }: Props) {
         </button>
       </div>
       <p style={styles.searchNote}>
-        No wallet connection required. Anyone can look up escrow state for any ANT.
+        No wallet connection required. Anyone can look up escrow state for any escrow.
       </p>
 
       {error && (
@@ -349,7 +349,7 @@ const styles: Record<string, React.CSSProperties> = {
   h1: {
     fontFamily: "'Besley', Georgia, serif",
     fontSize: '40px',
-    fontWeight: 800,
+    fontWeight: 700,
     color: brand.black,
     lineHeight: 1.15,
     margin: 0,
@@ -364,6 +364,7 @@ const styles: Record<string, React.CSSProperties> = {
   searchRow: {
     display: 'flex',
     gap: '8px',
+    flexWrap: 'wrap' as const,
   },
   searchNote: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
@@ -372,11 +373,11 @@ const styles: Record<string, React.CSSProperties> = {
     margin: '0',
   },
   input: {
-    flex: 1,
+    flex: '1 1 200px',
     padding: '11px 14px',
     fontSize: '14px',
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.white,
     fontFamily: 'monospace',
     outline: 'none',
@@ -386,7 +387,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '11px 20px',
     border: 'none',
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.primary,
     color: brand.white,
     fontSize: '14px',
@@ -444,7 +445,7 @@ const styles: Record<string, React.CSSProperties> = {
   errorBox: {
     padding: '14px 16px',
     background: brand.errorBg,
-    borderRadius: '10px',
+    borderRadius: '16px',
     border: `1px solid ${brand.error}33`,
   },
   errorText: {

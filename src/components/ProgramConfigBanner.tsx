@@ -7,7 +7,7 @@ import { getEscrowProgramId } from '../services/solana.ts';
  * SDK ships no escrow program id for any public cluster, so without one
  * every deposit/claim/manage action fails at submit. Surfacing it up
  * front (instead of failing late) tells the user to set the contract ID
- * in the footer. Read-only flows (lookup, ANT reads) still work.
+ * in the menu. Read-only flows (lookup, ANT reads) still work.
  *
  * Renders nothing once a program id is set.
  */
@@ -18,7 +18,7 @@ export function ProgramConfigBanner() {
     <div role="alert" style={styles.banner}>
       <strong style={styles.label}>Escrow program not configured</strong>
       <span style={styles.detail}>
-        Set the <em>escrow program ID</em> in the footer (or
+        Set the <em>escrow program ID</em> in the menu (or
         {' '}<code style={styles.code}>VITE_ESCROW_PROGRAM_ID</code>) to enable
         deposits, claims, and management. The SDK ships no escrow program for
         public clusters — point this at your deployment. Lookups still work.

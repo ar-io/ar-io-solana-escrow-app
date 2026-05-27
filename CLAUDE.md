@@ -43,6 +43,7 @@ This repo is a public extract of a directory (`migration/solana-escrow-app`) ins
 **Routing** (`src/App.tsx`): hand-rolled hash-based router (`#/route?query`) via the `useHashRoute` hook — no router library. `App.tsx` also owns the global shell, the Solana wallet providers (`ConnectionProvider`/`WalletProvider`/`WalletModalProvider`), and the RPC selector. `src/brand.ts` is the source of truth for brand colors (re-exported from `App.tsx` to break a circular-import TDZ).
 
 **Pages** (`src/pages/`) — one per route:
+- `LandingPage` — explainer + links to flows (`/#/`).
 - `DepositPage` / `DepositTokensPage` / `DepositVaultPage` — depositor flows (ANT / liquid ARIO / time-locked vault).
 - `ClaimPage` — recipient flow: fetch escrow state, build the canonical message, sign with the Arweave/Ethereum wallet, submit.
 - `ManagePage` — depositor's `update_recipient` + `cancel`.
@@ -70,7 +71,7 @@ Two canonical-message versions coexist, both from `@ar.io/sdk/solana`: `canonica
 ### Build/polyfill notes
 
 - `vite.config.ts` sets `base: "./"` (relative paths, for Arweave subpath hosting) and uses `vite-plugin-node-polyfills` for `buffer`/`crypto`/`stream` etc. — required by the multi-chain wallet/crypto libs.
-- `@` is aliased to `src/`.
+- `@` is aliased to `src/` in Vite config (currently unused — all source imports use relative paths).
 - `import.meta.env.PACKAGE_VERSION` and `BUILD_TIME` are injected from `package.json` / build date.
 - Wallet-adapter providers are cast to `any` in `App.tsx` as a React 18/19 type-compat shim.
 

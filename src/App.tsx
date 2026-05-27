@@ -49,6 +49,25 @@ function ArioLogo() {
   );
 }
 
+function MenuIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="6" y1="6" x2="18" y2="18" />
+      <line x1="6" y1="18" x2="18" y2="6" />
+    </svg>
+  );
+}
+
 /** Hash-based routing — same lightweight approach as the registration app. */
 function useHashRoute(): { route: string; query: URLSearchParams } {
   const [hash, setHash] = useState(window.location.hash || '#/');
@@ -119,12 +138,21 @@ export function App() {
 
   const [programId, setProgramId] = useState(() => getEscrowProgramId() ?? '');
   const [arioMint, setArioMintState] = useState(() => getArioMintOverride());
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [menuOpen]);
 
   const handleProgramIdChange = (value: string) => {
     const trimmed = value.trim();
     setProgramId(trimmed);
     setEscrowProgramId(trimmed);
-    // Reload so any open client picks up the new program id.
     window.location.reload();
   };
 
@@ -143,7 +171,6 @@ export function App() {
     setShowCustom(false);
     setRpcUrl(value);
     localStorage.setItem('escrow-rpc-url', value);
-    // Force remount of ConnectionProvider by reloading
     window.location.reload();
   };
 
@@ -163,151 +190,161 @@ export function App() {
             <header className="app-header" style={styles.header}>
               <a href="#/" style={styles.logoLink}>
                 <ArioLogo />
-                <span style={styles.badge}>ANT Escrow</span>
+                <span style={styles.badge}>Escrow</span>
               </a>
-              <nav style={styles.nav}>
-                <NavLink href="#/deposit" current={route} target="deposit">
-                  Deposit ANT
-                </NavLink>
-                <NavLink href="#/deposit-tokens" current={route} target="deposit-tokens">
-                  Deposit Tokens
-                </NavLink>
-                <NavLink href="#/deposit-vault" current={route} target="deposit-vault">
-                  Deposit Vault
-                </NavLink>
-                <NavLink href="#/claim" current={route} target="claim">
-                  Claim
-                </NavLink>
-                <NavLink href="#/manage" current={route} target="manage">
-                  Manage
-                </NavLink>
-                <NavLink href="#/lookup" current={route} target="lookup">
-                  Lookup
-                </NavLink>
-                <a
-                  href="https://ar.io/ant-escrow"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="nav-link"
+              <div style={styles.menuWrapper}>
+                <button
+                  className="menu-button"
+                  onClick={() => setMenuOpen(!menuOpen)}
+                  style={styles.menuButton}
+                  aria-label={menuOpen ? 'Close menu' : 'Open menu'}
                 >
-                  Help
-                </a>
-              </nav>
+                  {menuOpen ? <CloseIcon /> : <MenuIcon />}
+                </button>
+                {menuOpen && (
+                  <>
+                    <div
+                      style={styles.menuBackdrop}
+                      onClick={() => setMenuOpen(false)}
+                    />
+                    <div className="menu-panel" style={styles.menuPanel}>
+                      <nav style={styles.menuNav}>
+                        {([
+                          ['#/deposit', 'deposit', 'Deposit ANT'],
+                          ['#/deposit-tokens', 'deposit-tokens', 'Deposit Tokens'],
+                          ['#/deposit-vault', 'deposit-vault', 'Deposit Vault'],
+                          ['#/claim', 'claim', 'Claim'],
+                          ['#/manage', 'manage', 'Manage'],
+                          ['#/lookup', 'lookup', 'Lookup'],
+                        ] as const).map(([href, target, label]) => (
+                          <a
+                            key={target}
+                            href={href}
+                            className={`menu-nav-link ${route === target ? 'menu-nav-link--active' : ''}`}
+                            onClick={() => setMenuOpen(false)}
+                          >
+                            {label}
+                          </a>
+                        ))}
+                      </nav>
+                      <div style={styles.menuDivider} />
+                      <div style={styles.menuSection}>
+                        <span style={styles.menuSectionLabel}>Settings</span>
+                        <label style={styles.menuLabel}>RPC Endpoint</label>
+                        <select
+                          value={showCustom ? 'custom' : rpcUrl}
+                          onChange={(e) => handleRpcChange(e.target.value)}
+                          style={styles.menuSelect}
+                        >
+                          {Object.entries(RPC_PRESETS).map(([name, url]) => (
+                            <option key={name} value={url}>
+                              {name}
+                            </option>
+                          ))}
+                          <option value="custom">custom</option>
+                        </select>
+                        {showCustom && (
+                          <input
+                            type="text"
+                            defaultValue={rpcUrl}
+                            placeholder="https://..."
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter')
+                                handleCustomRpc(
+                                  (e.target as HTMLInputElement).value,
+                                );
+                            }}
+                            onBlur={(e) => handleCustomRpc(e.target.value)}
+                            style={styles.menuInput}
+                          />
+                        )}
+                        <label style={styles.menuLabel}>
+                          Escrow Program ID
+                        </label>
+                        <input
+                          type="text"
+                          defaultValue={programId}
+                          placeholder="Required for escrow actions"
+                          title={
+                            'Escrow program ID. Required — the SDK ships no ' +
+                            'program ID for public clusters. Press Enter to apply (reloads).'
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter')
+                              handleProgramIdChange(
+                                (e.target as HTMLInputElement).value,
+                              );
+                          }}
+                          onBlur={(e) => {
+                            if (e.target.value.trim() !== programId)
+                              handleProgramIdChange(e.target.value);
+                          }}
+                          style={{
+                            ...styles.menuInput,
+                            borderColor: programId
+                              ? brand.border
+                              : brand.warning,
+                          }}
+                        />
+                        <label style={styles.menuLabel}>ARIO Mint</label>
+                        <input
+                          type="text"
+                          defaultValue={arioMint}
+                          placeholder="Auto-detected"
+                          title={
+                            'ARIO SPL mint override. Leave blank for network ' +
+                            'default. Press Enter to apply (reloads).'
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter')
+                              handleArioMintChange(
+                                (e.target as HTMLInputElement).value,
+                              );
+                          }}
+                          onBlur={(e) => {
+                            if (e.target.value.trim() !== arioMint)
+                              handleArioMintChange(e.target.value);
+                          }}
+                          style={styles.menuInput}
+                        />
+                      </div>
+                      <div style={styles.menuDivider} />
+                      <div style={styles.menuLinks}>
+                        <a
+                          href="https://docs.ar.io"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="menu-ext-link"
+                        >
+                          Docs
+                        </a>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             </header>
             <main className="app-main" style={styles.main}>
               <Router route={route} query={query} />
             </main>
             <footer style={styles.footer}>
-              <a href="https://ar.io" target="_blank" rel="noopener noreferrer" style={styles.footerLink}>
+              <a
+                href="https://ar.io"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={styles.footerLink}
+              >
                 ar.io
               </a>
               <span style={styles.footerDot}>&middot;</span>
-              <a href="https://docs.ar.io" target="_blank" rel="noopener noreferrer" style={styles.footerLink}>
-                Docs
-              </a>
-              <span style={styles.footerDot}>&middot;</span>
-              <a href="https://discord.com/invite/HGG52EtTc2" target="_blank" rel="noopener noreferrer" style={styles.footerLink}>
-                Support
-              </a>
-              <span style={styles.footerDot}>&middot;</span>
-              <span style={styles.footerVersion}>v{import.meta.env.PACKAGE_VERSION}</span>
-              <span style={styles.footerDot}>&middot;</span>
-              <select
-                value={showCustom ? 'custom' : rpcUrl}
-                onChange={(e) => handleRpcChange(e.target.value)}
-                style={styles.rpcSelect}
-                title="Solana RPC endpoint"
-              >
-                {Object.entries(RPC_PRESETS).map(([name, url]) => (
-                  <option key={name} value={url}>
-                    {name}
-                  </option>
-                ))}
-                <option value="custom">custom</option>
-              </select>
-              {showCustom && (
-                <input
-                  type="text"
-                  defaultValue={rpcUrl}
-                  placeholder="https://..."
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleCustomRpc((e.target as HTMLInputElement).value);
-                  }}
-                  onBlur={(e) => handleCustomRpc(e.target.value)}
-                  style={styles.rpcInput}
-                />
-              )}
-              <span style={styles.footerDot}>&middot;</span>
-              <input
-                type="text"
-                defaultValue={programId}
-                placeholder="escrow program ID"
-                title={
-                  'Escrow (ario-ant-escrow) program ID. Required — the SDK ships no ' +
-                  'escrow program for any public cluster, so point this at your deployment. ' +
-                  'Press Enter to apply (reloads).'
-                }
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter')
-                    handleProgramIdChange((e.target as HTMLInputElement).value);
-                }}
-                onBlur={(e) => {
-                  if (e.target.value.trim() !== programId)
-                    handleProgramIdChange(e.target.value);
-                }}
-                style={{
-                  ...styles.rpcInput,
-                  width: '180px',
-                  borderColor: programId ? brand.border : brand.warning,
-                }}
-              />
-              <span style={styles.footerDot}>&middot;</span>
-              <input
-                type="text"
-                defaultValue={arioMint}
-                placeholder="ARIO mint (optional)"
-                title={
-                  'ARIO SPL mint override for token/vault flows. Leave blank to ' +
-                  'use the network default (devnet/mainnet). Set this for a custom ' +
-                  'cluster whose ARIO mint differs. Press Enter to apply (reloads).'
-                }
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter')
-                    handleArioMintChange((e.target as HTMLInputElement).value);
-                }}
-                onBlur={(e) => {
-                  if (e.target.value.trim() !== arioMint)
-                    handleArioMintChange(e.target.value);
-                }}
-                style={{ ...styles.rpcInput, width: '150px' }}
-              />
+              <span style={styles.footerVersion}>
+                v{import.meta.env.PACKAGE_VERSION}
+              </span>
             </footer>
           </div>
         </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
-  );
-}
-
-function NavLink({
-  href,
-  current,
-  target,
-  children,
-}: {
-  href: string;
-  current: string;
-  target: string;
-  children: React.ReactNode;
-}) {
-  const isActive = current === target;
-  return (
-    <a
-      href={href}
-      className={`nav-link ${isActive ? 'nav-link--active' : ''}`}
-    >
-      {children}
-    </a>
   );
 }
 
@@ -355,26 +392,117 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: '6px',
   },
-  nav: {
-    display: 'flex',
-    gap: '20px',
-    flexWrap: 'wrap' as const,
-  },
   main: {
     flex: 1,
     display: 'flex',
     justifyContent: 'center',
     padding: '32px 24px',
   },
+  /* ── Menu ── */
+  menuWrapper: {
+    position: 'relative' as const,
+  },
+  menuButton: {
+    background: 'none',
+    border: `1px solid ${brand.border}`,
+    borderRadius: '8px',
+    padding: '6px 8px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: brand.textSecondary,
+    transition: 'border-color 0.15s, color 0.15s',
+  },
+  menuBackdrop: {
+    position: 'fixed' as const,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 90,
+  },
+  menuPanel: {
+    position: 'absolute' as const,
+    top: 'calc(100% + 8px)',
+    right: 0,
+    width: '300px',
+    maxWidth: 'calc(100vw - 32px)',
+    maxHeight: 'calc(100vh - 80px)',
+    overflowY: 'auto' as const,
+    background: '#FFFFFF',
+    border: `1px solid ${brand.border}`,
+    borderRadius: '12px',
+    boxShadow: '0 8px 30px rgba(35, 35, 45, 0.12)',
+    zIndex: 100,
+  },
+  menuNav: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    padding: '8px',
+  },
+  menuDivider: {
+    height: '1px',
+    background: brand.border,
+    margin: '4px 16px',
+  },
+  menuSection: {
+    padding: '8px 16px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '6px',
+  },
+  menuSectionLabel: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '11px',
+    fontWeight: 700,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.8px',
+    color: brand.textTertiary,
+  },
+  menuLabel: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '12px',
+    fontWeight: 600,
+    color: brand.textSecondary,
+  },
+  menuSelect: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '13px',
+    padding: '6px 10px',
+    border: `1px solid ${brand.border}`,
+    borderRadius: '8px',
+    background: '#FFFFFF',
+    color: brand.black,
+    cursor: 'pointer',
+    outline: 'none',
+  },
+  menuInput: {
+    fontFamily: 'monospace',
+    fontSize: '12px',
+    padding: '6px 10px',
+    border: `1px solid ${brand.border}`,
+    borderRadius: '8px',
+    color: brand.textSecondary,
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box' as const,
+  },
+  menuLinks: {
+    display: 'flex',
+    gap: '16px',
+    padding: '8px 16px 12px',
+  },
+  /* ── Footer ── */
   footer: {
     display: 'flex',
     justifyContent: 'center',
     alignItems: 'center',
     gap: '12px',
-    padding: '20px',
+    padding: '16px 20px',
     fontSize: '13px',
     fontWeight: 600,
-    color: brand.black,
+    color: brand.textTertiary,
     borderTop: `1px solid ${brand.border}`,
   },
   footerLink: {
@@ -389,27 +517,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     fontSize: '12px',
     color: brand.textTertiary,
-  },
-  rpcSelect: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '12px',
-    color: brand.textTertiary,
-    background: 'transparent',
-    border: `1px solid ${brand.border}`,
-    borderRadius: '6px',
-    padding: '2px 6px',
-    cursor: 'pointer',
-    outline: 'none',
-  },
-  rpcInput: {
-    fontFamily: "monospace",
-    fontSize: '12px',
-    color: brand.textSecondary,
-    background: 'transparent',
-    border: `1px solid ${brand.border}`,
-    borderRadius: '6px',
-    padding: '2px 8px',
-    width: '200px',
-    outline: 'none',
   },
 };

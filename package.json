@@ -8,7 +8,7 @@
         "type": "git",
         "url": "https://github.com/ar-io/ar-io-solana-escrow-app.git"
     },
-    "description": "Web UI for the AR.IO ANT escrow program. Forked from ar-io-solana-registration-app — same wallet plumbing, repurposed for trustless multi-protocol ANT custody (deposit / claim / manage / lookup flows).",
+    "description": "Web UI for the AR.IO escrow program. Forked from ar-io-solana-registration-app — same wallet plumbing, repurposed for trustless multi-protocol ANT custody (deposit / claim / manage / lookup flows).",
     "scripts": {
         "dev": "vite",
         "build": "tsc && vite build",

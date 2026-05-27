@@ -80,7 +80,7 @@ export function DepositPage() {
     try {
       if (!getEscrowProgramId()) {
         throw new Error(
-          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
+          'No escrow program configured. Set the program ID in the menu (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
         );
       }
 
@@ -126,7 +126,7 @@ export function DepositPage() {
 
   return (
     <div style={styles.wrap}>
-      <h1 style={styles.h1}>Deposit an ANT</h1>
+      <h1 className="page-title" style={styles.h1}>Deposit an ANT</h1>
       <p style={styles.lede}>
         Lock one of your ANTs into the trustless escrow program. The
         recipient — designated below — releases the ANT by signing a
@@ -292,7 +292,7 @@ const styles: Record<string, React.CSSProperties> = {
   h1: {
     fontFamily: "'Besley', Georgia, serif",
     fontSize: '40px',
-    fontWeight: 800,
+    fontWeight: 700,
     color: brand.black,
     lineHeight: 1.15,
     margin: 0,
@@ -309,7 +309,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '11px 14px',
     fontSize: '14px',
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.white,
     fontFamily: 'monospace',
     outline: 'none',
@@ -318,12 +318,13 @@ const styles: Record<string, React.CSSProperties> = {
   textarea: {
     width: '100%',
     padding: '11px 14px',
-    fontSize: '13px',
+    fontSize: '14px',
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.white,
     fontFamily: 'monospace',
     resize: 'vertical' as const,
+    boxSizing: 'border-box' as const,
     outline: 'none',
     transition: 'border-color 0.15s, box-shadow 0.15s',
   },
@@ -345,12 +346,13 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '8px',
     marginBottom: '12px',
+    flexWrap: 'wrap' as const,
   },
   protocolButton: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '10px 16px',
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.white,
     color: brand.black,
     fontSize: '14px',
@@ -373,7 +375,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '12px 24px',
     border: 'none',
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.primary,
     color: brand.white,
     fontSize: '15px',
@@ -391,7 +393,7 @@ const styles: Record<string, React.CSSProperties> = {
   successBox: {
     padding: '16px',
     background: brand.successBg,
-    borderRadius: '10px',
+    borderRadius: '16px',
     border: `1px solid ${brand.success}33`,
   },
   successText: {
@@ -408,7 +410,7 @@ const styles: Record<string, React.CSSProperties> = {
   errorBox: {
     padding: '14px 16px',
     background: brand.errorBg,
-    borderRadius: '10px',
+    borderRadius: '16px',
     border: `1px solid ${brand.error}33`,
   },
   errorText: {

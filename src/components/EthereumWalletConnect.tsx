@@ -474,7 +474,7 @@ function getStyles(): Record<string, React.CSSProperties> {
             alignItems: "center",
             padding: "12px 16px",
             border: `1px solid ${brand.border}`,
-            borderRadius: "10px",
+            borderRadius: "16px",
             backgroundColor: brand.white,
             cursor: "pointer",
             transition: "all 0.2s ease",

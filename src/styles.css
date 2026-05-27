@@ -39,7 +39,7 @@
   background: #5427C8;
   color: #FFFFFF;
   border: none;
-  border-radius: 10px;
+  border-radius: 16px;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
@@ -73,7 +73,7 @@
   background: #5427C8;
   color: #FFFFFF;
   border: none;
-  border-radius: 10px;
+  border-radius: 16px;
   font-size: 15px;
   font-weight: 700;
   cursor: pointer;
@@ -107,7 +107,7 @@
   background: #F0F0F0;
   color: #23232D;
   border: 1px solid #E0E0E4;
-  border-radius: 10px;
+  border-radius: 16px;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
@@ -155,27 +155,51 @@
 }
 
 /* =========================================
-   Navigation
+   Navigation — dropdown menu
    ========================================= */
 
-.nav-link {
+.menu-button:hover {
+  border-color: #5427C8 !important;
+  color: #23232D !important;
+}
+
+.menu-panel {
+  animation: fade-in 0.15s ease both;
+}
+
+.menu-nav-link {
   font-family: 'Plus Jakarta Sans', sans-serif;
+  display: block;
+  padding: 8px 12px;
+  border-radius: 8px;
   color: #6B6B78;
   text-decoration: none;
   font-size: 14px;
   font-weight: 600;
-  transition: color 0.15s;
-  padding: 4px 0;
-  border-bottom: 2px solid transparent;
+  transition: background 0.15s, color 0.15s;
 }
 
-.nav-link:hover {
+.menu-nav-link:hover {
+  background: #F0F0F0;
   color: #23232D;
 }
 
-.nav-link--active {
+.menu-nav-link--active {
   color: #5427C8;
-  border-bottom-color: #5427C8;
+  background: rgba(84, 39, 200, 0.06);
+}
+
+.menu-ext-link {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #6B6B78;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.menu-ext-link:hover {
+  color: #5427C8;
 }
 
 /* =========================================
@@ -187,11 +211,12 @@
   padding: 11px 14px;
   background: #FFFFFF;
   border: 1px solid #E0E0E4;
-  border-radius: 10px;
+  border-radius: 16px;
   color: #23232D;
   font-size: 14px;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
 }
 
 .input:focus {
@@ -211,7 +236,7 @@
 .wallet-adapter-button {
   font-family: 'Plus Jakarta Sans', sans-serif !important;
   background-color: #5427C8 !important;
-  border-radius: 10px !important;
+  border-radius: 16px !important;
   font-weight: 600 !important;
   font-size: 14px !important;
   height: 44px !important;
@@ -267,7 +292,7 @@
 }
 
 .wallet-adapter-modal-list .wallet-adapter-button {
-  border-radius: 10px !important;
+  border-radius: 16px !important;
   font-size: 15px !important;
   font-weight: 500 !important;
   color: #23232D !important;
@@ -405,12 +430,15 @@
 @media (max-width: 640px) {
   .app-header {
     padding: 12px 16px !important;
-    gap: 12px !important;
-    flex-wrap: wrap !important;
   }
 
   .app-main {
-    padding: 32px 16px !important;
+    padding: 24px 16px !important;
+  }
+
+  /* Responsive page titles */
+  .page-title {
+    font-size: 28px !important;
   }
 
   .step-card {
@@ -436,11 +464,6 @@
   .success-banner .btn-text {
     width: 100% !important;
     text-align: center !important;
-  }
-
-  /* Nav links tighter */
-  .nav-link {
-    font-size: 13px !important;
   }
 
   /* Wallet adapter modal — tighter on mobile */

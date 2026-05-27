@@ -128,7 +128,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       const programId = getEscrowProgramId();
       if (!programId) {
         setEscrowError(
-          'No escrow program configured. Set the contract ID in the footer (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
+          'No escrow program configured. Set the program ID in the menu (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
         );
         return;
       }
@@ -654,7 +654,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
 
   return (
     <div style={styles.wrap}>
-      <h1 style={styles.h1}>Claim an escrow</h1>
+      <h1 className="page-title" style={styles.h1}>Claim an escrow</h1>
       <p style={styles.lede}>
         A depositor sent you an ANT or ARIO tokens. Connect your Arweave or
         Ethereum wallet to sign the canonical message; the on-chain
@@ -1040,7 +1040,7 @@ const styles: Record<string, React.CSSProperties> = {
   h1: {
     fontFamily: "'Besley', Georgia, serif",
     fontSize: '40px',
-    fontWeight: 800,
+    fontWeight: 700,
     color: brand.black,
     lineHeight: 1.15,
     margin: 0,
@@ -1057,7 +1057,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '11px 14px',
     fontSize: '14px',
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.white,
     fontFamily: 'monospace',
     outline: 'none',
@@ -1137,19 +1137,20 @@ const styles: Record<string, React.CSSProperties> = {
   canonicalPreview: {
     background: brand.cardSurface,
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     padding: '16px',
     fontSize: '12px',
     fontFamily: 'monospace',
     margin: 0,
-    whiteSpace: 'pre' as const,
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-all' as const,
     overflow: 'auto',
   },
   signButton: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '10px 18px',
     border: 'none',
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.primary,
     color: brand.white,
     fontSize: '14px',
@@ -1162,7 +1163,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 14px',
     background: brand.successBg,
     border: `1px solid ${brand.success}33`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     fontSize: '13px',
     color: brand.success,
     fontWeight: 600,
@@ -1172,7 +1173,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '12px 24px',
     border: 'none',
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.primary,
     color: brand.white,
     fontSize: '15px',
@@ -1189,7 +1190,7 @@ const styles: Record<string, React.CSSProperties> = {
   successBox: {
     padding: '16px',
     background: brand.successBg,
-    borderRadius: '10px',
+    borderRadius: '16px',
     border: `1px solid ${brand.success}33`,
   },
   successText: {
@@ -1206,7 +1207,7 @@ const styles: Record<string, React.CSSProperties> = {
   errorBox: {
     padding: '14px 16px',
     background: brand.errorBg,
-    borderRadius: '10px',
+    borderRadius: '16px',
     border: `1px solid ${brand.error}33`,
   },
   errorText: {
@@ -1279,7 +1280,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '8px 16px',
     border: `1px solid ${brand.border}`,
-    borderRadius: '10px',
+    borderRadius: '16px',
     background: brand.cardSurface,
     color: brand.black,
     fontSize: '13px',
