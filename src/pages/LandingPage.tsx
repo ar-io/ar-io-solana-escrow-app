@@ -1,12 +1,5 @@
 import React from 'react';
-import {
-  Lock,
-  Coins,
-  Vault,
-  FileSignature,
-  Settings,
-  Search,
-} from 'lucide-react';
+import { Lock, Coins, Vault, FileSignature, Settings, Search } from 'lucide-react';
 import { brand } from '../brand.js';
 import { areDepositsEnabled } from '../services/solana.ts';
 
@@ -26,30 +19,31 @@ export function LandingPage() {
       </p>
 
       <div style={styles.grid}>
-        <FlowCard
-          icon={<Lock size={20} />}
-          title="Deposit an ANT"
-          desc="Lock one of your ANTs into escrow, addressed to an Arweave or Ethereum recipient. Reversible until claimed."
-          href={depositsOn ? '#/deposit' : undefined}
-          cta="Deposit ANT →"
-          disabled={!depositsOn}
-        />
-        <FlowCard
-          icon={<Coins size={20} />}
-          title="Deposit ARIO Tokens"
-          desc="Lock ARIO tokens into escrow for an Arweave or Ethereum recipient. They claim by signing a message."
-          href={depositsOn ? '#/deposit-tokens' : undefined}
-          cta="Deposit tokens →"
-          disabled={!depositsOn}
-        />
-        <FlowCard
-          icon={<Vault size={20} />}
-          title="Deposit Vaulted ARIO"
-          desc="Lock ARIO into a time-locked vault escrow. The recipient receives a vault with the remaining lock duration."
-          href={depositsOn ? '#/deposit-vault' : undefined}
-          cta="Deposit vault →"
-          disabled={!depositsOn}
-        />
+        {depositsOn && (
+          <>
+            <FlowCard
+              icon={<Lock size={20} />}
+              title="Deposit an ANT"
+              desc="Lock one of your ANTs into escrow, addressed to an Arweave or Ethereum recipient. Reversible until claimed."
+              href="#/deposit"
+              cta="Deposit ANT →"
+            />
+            <FlowCard
+              icon={<Coins size={20} />}
+              title="Deposit ARIO Tokens"
+              desc="Lock ARIO tokens into escrow for an Arweave or Ethereum recipient. They claim by signing a message."
+              href="#/deposit-tokens"
+              cta="Deposit tokens →"
+            />
+            <FlowCard
+              icon={<Vault size={20} />}
+              title="Deposit Vaulted ARIO"
+              desc="Lock ARIO into a time-locked vault escrow. The recipient receives a vault with the remaining lock duration."
+              href="#/deposit-vault"
+              cta="Deposit vault →"
+            />
+          </>
+        )}
         <FlowCard
           icon={<FileSignature size={20} />}
           title="Claim"
@@ -73,13 +67,6 @@ export function LandingPage() {
         />
       </div>
 
-      {!depositsOn && (
-        <p style={styles.depositNote}>
-          Deposit flows are disabled by default. Enable them in the menu
-          under <strong>Settings → Deposits</strong>.
-        </p>
-      )}
-
       <div style={styles.trustNote}>
         <p style={styles.trustText}>
           All escrow operations are verified fully on-chain — no off-chain
@@ -100,35 +87,20 @@ function FlowCard({
   desc,
   href,
   cta,
-  disabled,
 }: {
   icon: React.ReactNode;
   title: string;
   desc: string;
-  href?: string;
+  href: string;
   cta: string;
-  disabled?: boolean;
 }) {
-  const Tag = disabled ? 'div' : 'a';
   return (
-    <Tag
-      {...(disabled ? {} : { href })}
-      className={disabled ? undefined : 'step-card'}
-      style={{
-        ...styles.card,
-        ...(disabled ? styles.cardDisabled : {}),
-      }}
-    >
+    <a href={href} className="step-card" style={styles.card}>
       <div style={styles.cardIcon}>{icon}</div>
       <h3 style={styles.cardTitle}>{title}</h3>
       <p style={styles.cardDesc}>{desc}</p>
-      <span style={{
-        ...styles.cardCta,
-        ...(disabled ? { color: brand.textTertiary } : {}),
-      }}>
-        {disabled ? 'Disabled' : cta}
-      </span>
-    </Tag>
+      <span style={styles.cardCta}>{cta}</span>
+    </a>
   );
 }
 
@@ -173,11 +145,6 @@ const styles: Record<string, React.CSSProperties> = {
     transition: 'transform 0.2s ease-out, box-shadow 0.2s, border-color 0.2s',
     boxShadow: '0 1px 3px rgba(35, 35, 45, 0.04)',
   },
-  cardDisabled: {
-    opacity: 0.5,
-    cursor: 'default',
-    pointerEvents: 'none' as const,
-  },
   cardIcon: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -204,12 +171,6 @@ const styles: Record<string, React.CSSProperties> = {
     margin: '0 0 16px',
   },
   cardCta: { color: brand.primary, fontWeight: 600, fontSize: '14px' },
-  depositNote: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '13px',
-    color: brand.textTertiary,
-    margin: '-8px 0 0',
-  },
   trustNote: {
     padding: '24px',
     background: `radial-gradient(ellipse 140% 120% at top left, rgba(84, 39, 200, 0.03), transparent), rgba(255, 255, 255, 0.85)`,

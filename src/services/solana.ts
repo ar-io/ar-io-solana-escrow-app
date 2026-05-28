@@ -167,18 +167,10 @@ export function getTokenEscrow(opts: ClientOpts = {}): TokenEscrow {
 }
 
 // ---------------------------------------------------------------------------
-// Deposits feature gate (localStorage, default off)
+// Deposits feature gate (build-time env var, default off)
 // ---------------------------------------------------------------------------
-const DEPOSITS_KEY = 'escrow-deposits-enabled';
 
+/** Deposit flows are only available when explicitly enabled at build time. */
 export function areDepositsEnabled(): boolean {
-  return localStorage.getItem(DEPOSITS_KEY) === 'true';
-}
-
-export function setDepositsEnabled(on: boolean) {
-  if (on) {
-    localStorage.setItem(DEPOSITS_KEY, 'true');
-  } else {
-    localStorage.removeItem(DEPOSITS_KEY);
-  }
+  return import.meta.env.VITE_DEPOSITS_ENABLED === 'true';
 }

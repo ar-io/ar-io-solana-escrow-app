@@ -20,7 +20,6 @@ import {
   getArioMintOverride,
   setArioMint,
   areDepositsEnabled,
-  setDepositsEnabled,
 } from './services/solana.ts';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
@@ -140,7 +139,7 @@ export function App() {
 
   const [programId, setProgramId] = useState(() => getEscrowProgramId() ?? '');
   const [arioMint, setArioMintState] = useState(() => getArioMintOverride());
-  const [depositsOn, setDepositsOn] = useState(() => areDepositsEnabled());
+  const depositsOn = areDepositsEnabled();
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -312,20 +311,6 @@ export function App() {
                           }}
                           style={styles.menuInput}
                         />
-                        <label style={styles.menuToggleRow}>
-                          <input
-                            type="checkbox"
-                            checked={depositsOn}
-                            onChange={(e) => {
-                              setDepositsEnabled(e.target.checked);
-                              setDepositsOn(e.target.checked);
-                            }}
-                            style={styles.menuCheckbox}
-                          />
-                          <span style={styles.menuLabel}>
-                            Enable deposit flows
-                          </span>
-                        </label>
                       </div>
                       <div style={styles.menuDivider} />
                       <div style={styles.menuLinks}>
@@ -505,20 +490,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: brand.textSecondary,
     outline: 'none',
     width: '100%',
-    boxSizing: 'border-box' as const,
-  },
-  menuToggleRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    cursor: 'pointer',
-    marginTop: '4px',
-  },
-  menuCheckbox: {
-    width: '14px',
-    height: '14px',
-    accentColor: brand.primary,
-    cursor: 'pointer',
     boxSizing: 'border-box' as const,
   },
   menuLinks: {
