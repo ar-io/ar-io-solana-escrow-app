@@ -19,6 +19,8 @@ import {
   setEscrowProgramId,
   getArioMintOverride,
   setArioMint,
+  areDepositsEnabled,
+  setDepositsEnabled,
 } from './services/solana.ts';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
@@ -87,14 +89,14 @@ function useHashRoute(): { route: string; query: URLSearchParams } {
   };
 }
 
-function Router({ route, query }: { route: string; query: URLSearchParams }) {
+function Router({ route, query, depositsOn }: { route: string; query: URLSearchParams; depositsOn: boolean }) {
   switch (route) {
     case 'deposit':
-      return <DepositPage />;
+      return depositsOn ? <DepositPage /> : <LandingPage />;
     case 'deposit-tokens':
-      return <DepositTokensPage />;
+      return depositsOn ? <DepositTokensPage /> : <LandingPage />;
     case 'deposit-vault':
-      return <DepositVaultPage />;
+      return depositsOn ? <DepositVaultPage /> : <LandingPage />;
     case 'claim':
       return <ClaimPage antMint={query.get('ant') ?? ''} />;
     case 'manage':
@@ -138,6 +140,7 @@ export function App() {
 
   const [programId, setProgramId] = useState(() => getEscrowProgramId() ?? '');
   const [arioMint, setArioMintState] = useState(() => getArioMintOverride());
+  const [depositsOn, setDepositsOn] = useState(() => areDepositsEnabled());
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -210,9 +213,11 @@ export function App() {
                     <div className="menu-panel" style={styles.menuPanel}>
                       <nav style={styles.menuNav}>
                         {([
-                          ['#/deposit', 'deposit', 'Deposit ANT'],
-                          ['#/deposit-tokens', 'deposit-tokens', 'Deposit Tokens'],
-                          ['#/deposit-vault', 'deposit-vault', 'Deposit Vault'],
+                          ...(depositsOn ? [
+                            ['#/deposit', 'deposit', 'Deposit ANT'],
+                            ['#/deposit-tokens', 'deposit-tokens', 'Deposit Tokens'],
+                            ['#/deposit-vault', 'deposit-vault', 'Deposit Vault'],
+                          ] as const : []),
                           ['#/claim', 'claim', 'Claim'],
                           ['#/manage', 'manage', 'Manage'],
                           ['#/lookup', 'lookup', 'Lookup'],
@@ -307,6 +312,20 @@ export function App() {
                           }}
                           style={styles.menuInput}
                         />
+                        <label style={styles.menuToggleRow}>
+                          <input
+                            type="checkbox"
+                            checked={depositsOn}
+                            onChange={(e) => {
+                              setDepositsEnabled(e.target.checked);
+                              setDepositsOn(e.target.checked);
+                            }}
+                            style={styles.menuCheckbox}
+                          />
+                          <span style={styles.menuLabel}>
+                            Enable deposit flows
+                          </span>
+                        </label>
                       </div>
                       <div style={styles.menuDivider} />
                       <div style={styles.menuLinks}>
@@ -325,7 +344,7 @@ export function App() {
               </div>
             </header>
             <main className="app-main" style={styles.main}>
-              <Router route={route} query={query} />
+              <Router route={route} query={query} depositsOn={depositsOn} />
             </main>
             <footer style={styles.footer}>
               <a
@@ -486,6 +505,20 @@ const styles: Record<string, React.CSSProperties> = {
     color: brand.textSecondary,
     outline: 'none',
     width: '100%',
+    boxSizing: 'border-box' as const,
+  },
+  menuToggleRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    cursor: 'pointer',
+    marginTop: '4px',
+  },
+  menuCheckbox: {
+    width: '14px',
+    height: '14px',
+    accentColor: brand.primary,
+    cursor: 'pointer',
     boxSizing: 'border-box' as const,
   },
   menuLinks: {

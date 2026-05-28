@@ -165,3 +165,20 @@ export function getAntEscrow(opts: ClientOpts = {}): ANTEscrow {
 export function getTokenEscrow(opts: ClientOpts = {}): TokenEscrow {
   return new TokenEscrow(baseConfig(opts));
 }
+
+// ---------------------------------------------------------------------------
+// Deposits feature gate (localStorage, default off)
+// ---------------------------------------------------------------------------
+const DEPOSITS_KEY = 'escrow-deposits-enabled';
+
+export function areDepositsEnabled(): boolean {
+  return localStorage.getItem(DEPOSITS_KEY) === 'true';
+}
+
+export function setDepositsEnabled(on: boolean) {
+  if (on) {
+    localStorage.setItem(DEPOSITS_KEY, 'true');
+  } else {
+    localStorage.removeItem(DEPOSITS_KEY);
+  }
+}
