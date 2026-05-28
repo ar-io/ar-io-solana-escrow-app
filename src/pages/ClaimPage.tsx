@@ -533,21 +533,17 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
 
         if (tokenState.recipientProtocol === 'ethereum') {
           // Verified on-chain via secp256k1_recover. The SDK auto-creates
-          // the claimant ATA and, for active vaults, bundles the sibling
-          // ario_core::vaulted_transfer ix.
+          // the claimant ATA. Post-ADR-022 vaults are claimable only after
+          // `vault_end_timestamp` (the Submit button is already gated on
+          // !vaultLocked; the SDK also pre-flights and would throw).
           setClaimMessage('Waiting for wallet approval...');
           if (tokenState.assetType === 'vault') {
-            const payerTokenAccount = await getAtaForOwner(
-              getWalletSigner(wallet?.adapter).address,
-              arioMint,
-            );
             sig = await te.claimVaultEthereum({
               depositor: freshToken.depositor,
               assetId: freshToken.assetId,
               claimant: claimantAddr,
               claimantTokenAccount,
               escrowTokenAccount,
-              payerTokenAccount,
               signature,
             });
           } else {
@@ -650,7 +646,16 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const isValidClaimant = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(claimant.trim());
   const hasEscrow = !!escrowState || !!tokenState;
   const canSign = hasEscrow && isValidClaimant && !signing;
-  const canClaim = hasSignature && publicKey && claimStatus !== 'submitting';
+  // ADR-022: vaults are only claimable after `vault_end_timestamp`; a claim
+  // while still locked is rejected on-chain (`VaultStillLocked`) and the SDK
+  // throws pre-flight. Gate the Submit button to make the wait state explicit.
+  const vaultLocked =
+    !!tokenState &&
+    tokenState.assetType === 'vault' &&
+    tokenState.vaultEndTimestamp > 0n &&
+    Number(tokenState.vaultEndTimestamp) * 1000 > Date.now();
+  const canClaim =
+    hasSignature && publicKey && claimStatus !== 'submitting' && !vaultLocked;
 
   return (
     <div style={styles.wrap}>
@@ -728,7 +733,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
                 <span style={styles.escrowCardValue}>
                   {new Date(Number(tokenState.vaultEndTimestamp) * 1000).toLocaleString()}
                   {Number(tokenState.vaultEndTimestamp) * 1000 > Date.now()
-                    ? ' — your tokens will be placed in a vault'
+                    ? ' — claim after this time to receive liquid ARIO'
                     : ' — you will receive liquid ARIO'}
                 </span>
               </div>
@@ -992,6 +997,21 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           </div>
         ) : hasSignature ? (
           <>
+            {vaultLocked && tokenState && (
+              <div style={styles.errorBox}>
+                <p style={styles.errorText}>
+                  This vault is still locked. You can claim it after{' '}
+                  <strong>
+                    {new Date(
+                      Number(tokenState.vaultEndTimestamp) * 1000,
+                    ).toLocaleString()}
+                  </strong>
+                  , when the tokens will be delivered liquid to your wallet.
+                  Your signature above stays valid — come back after the
+                  unlock time and click Submit.
+                </p>
+              </div>
+            )}
             <button
               type="button"
               className="btn-primary"
