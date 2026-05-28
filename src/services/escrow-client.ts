@@ -309,7 +309,11 @@ function bytesToBase64url(bytes: Uint8Array): string {
 
 function deserializeEscrowAnt(data: Uint8Array): EscrowAntState {
   let offset = 8; // skip Anchor discriminator
-  const version = data[offset++];
+  // Cast to the SDK's branded `EscrowAntState['version']` type
+  // (`ArioAntEscrowStateSchemaVersion` from the generated codegen). The
+  // on-chain layout is a plain u8 schema version — the brand is a
+  // type-level convention from the client, not a runtime check.
+  const version = data[offset++] as unknown as EscrowAntState['version'];
   const bump = data[offset++];
   const depositor = bs58.encode(data.slice(offset, offset + 32)) as Address;
   offset += 32;
@@ -344,7 +348,8 @@ function deserializeEscrowAnt(data: Uint8Array): EscrowAntState {
 
 export function deserializeEscrowToken(data: Uint8Array): EscrowTokenState {
   let offset = 8;
-  const version = data[offset++];
+  // See deserializeEscrowAnt above — same brand cast pattern.
+  const version = data[offset++] as unknown as EscrowTokenState['version'];
   const bump = data[offset++];
   const depositor = bs58.encode(data.slice(offset, offset + 32)) as Address;
   offset += 32;
