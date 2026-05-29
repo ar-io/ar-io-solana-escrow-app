@@ -304,12 +304,60 @@ function bytesToBase64url(bytes: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
-// Raw-account deserialization (mirrors the contract state.rs layout)
+// Raw-account deserialization (mirrors `programs/ario-ant-escrow/src/state.rs`)
+//
+// IMPORTANT: when the on-chain layout changes (e.g. SchemaVersion expansion in
+// contracts commit 286b965), every offset below — AND every memcmp `offset:`
+// argument in the getProgramAccounts scans further down — must be updated.
+// The SDK's `src/solana/escrow-token.test.ts` byte-offset test in
+// `ar-io-sdk` is the canonical layout cross-check; mirror its sentinel
+// values here if you ever add a unit-test framework to this app.
+//
+// Current layout (post-SchemaVersion):
+//
+//   EscrowAnt (total 661):
+//     0..8    anchor discriminator
+//     8..11   version (SchemaVersion: major u8, minor u8, patch u8)
+//     11      bump
+//     12..44  depositor (Pubkey)        ← memcmp anchor for fetchEscrowsByDepositor
+//     44..76  ant_mint (Pubkey)
+//     76      recipient_protocol (u8)   ← memcmp anchor for fetchEscrowsByRecipient
+//     77..79  recipient_pubkey_len (u16 LE)
+//     79..591 recipient_pubkey ([u8;512])
+//     591..623 nonce ([u8;32])
+//     623..631 deposit_slot (u64 LE)
+//     631..661 _reserved ([u8;30])
+//
+//   EscrowToken (total 711):
+//     0..8    anchor discriminator
+//     8..11   version (SchemaVersion)
+//     11      bump
+//     12..44  depositor (Pubkey)        ← memcmp anchor for fetchAllEscrowsByDepositor
+//     44      asset_type (u8)
+//     45..53  amount (u64 LE)
+//     53..85  ario_mint (Pubkey)
+//     85..117 asset_id ([u8;32])
+//     117     recipient_protocol (u8)   ← memcmp anchor for fetchTokenEscrowsByRecipient
+//     118..120 recipient_pubkey_len (u16 LE)
+//     120..632 recipient_pubkey ([u8;512])
+//     632..664 nonce ([u8;32])
+//     664..672 deposit_slot (u64 LE)
+//     672..680 vault_end_timestamp (i64 LE)
+//     680     vault_revocable (bool; always false per ADR-021)
+//     681..711 _reserved ([u8;30])
 // ---------------------------------------------------------------------------
 
 function deserializeEscrowAnt(data: Uint8Array): EscrowAntState {
   let offset = 8; // skip Anchor discriminator
-  const version = data[offset++];
+  // `version` is a 3-byte `SchemaVersion` struct on-chain (since
+  // contracts commit 286b965, "fix(pdas): implement pda versioning"):
+  // `{ major: u8, minor: u8, patch: u8 }`. See
+  // programs/ario-ant-escrow/src/state.rs::SchemaVersion.
+  const version = {
+    major: data[offset++],
+    minor: data[offset++],
+    patch: data[offset++],
+  };
   const bump = data[offset++];
   const depositor = bs58.encode(data.slice(offset, offset + 32)) as Address;
   offset += 32;
@@ -344,7 +392,12 @@ function deserializeEscrowAnt(data: Uint8Array): EscrowAntState {
 
 export function deserializeEscrowToken(data: Uint8Array): EscrowTokenState {
   let offset = 8;
-  const version = data[offset++];
+  // See deserializeEscrowAnt above — `version` is a 3-byte SchemaVersion.
+  const version = {
+    major: data[offset++],
+    minor: data[offset++],
+    patch: data[offset++],
+  };
   const bump = data[offset++];
   const depositor = bs58.encode(data.slice(offset, offset + 32)) as Address;
   offset += 32;
@@ -480,14 +533,16 @@ async function scanProgram(
   }
 }
 
-/** All ANT escrows deposited by a wallet (memcmp on depositor at offset 10). */
+/** All ANT escrows deposited by a wallet. Memcmp on `depositor` at offset 12
+ * (post 8-disc + 3-byte SchemaVersion + 1-byte bump; see
+ * contracts state.rs::EscrowAnt). */
 export async function fetchEscrowsByDepositor(
   rpc: SolanaRpc,
   depositorPubkey: string,
   programId: string,
 ): Promise<Array<{ antMint: string; state: EscrowAntState }>> {
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 10, bytes: depositorPubkey },
+    { offset: 12, bytes: depositorPubkey }, // EscrowAnt.depositor
   ]);
   const results: Array<{ antMint: string; state: EscrowAntState }> = [];
   for (const { data } of accounts) {
@@ -502,14 +557,15 @@ export async function fetchEscrowsByDepositor(
   return results;
 }
 
-/** All escrows (ANT + token/vault) deposited by a wallet. */
+/** All escrows (ANT + token/vault) deposited by a wallet. Memcmp at offset
+ * 12 — same `depositor` position in both EscrowAnt and EscrowToken layouts. */
 export async function fetchAllEscrowsByDepositor(
   rpc: SolanaRpc,
   depositorPubkey: string,
   programId: string,
 ): Promise<EscrowResult[]> {
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 10, bytes: depositorPubkey },
+    { offset: 12, bytes: depositorPubkey }, // EscrowAnt|Token.depositor
   ]);
   const results: EscrowResult[] = [];
   for (const { data } of accounts) {
@@ -542,8 +598,8 @@ export async function fetchEscrowsByRecipient(
   const matchLen = recipientProtocol === 'ethereum' ? 20 : 32;
   const matchBytes = recipientBytes.slice(0, matchLen);
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 74, bytes: bs58.encode(new Uint8Array([protocolByte])) },
-    { offset: 77, bytes: bs58.encode(matchBytes) },
+    { offset: 76, bytes: bs58.encode(new Uint8Array([protocolByte])) }, // EscrowAnt.recipient_protocol
+    { offset: 79, bytes: bs58.encode(matchBytes) }, // EscrowAnt.recipient_pubkey
   ]);
   const results: Array<{ antMint: string; state: EscrowAntState }> = [];
   for (const { data } of accounts) {
@@ -569,7 +625,8 @@ export interface TokenEscrowByRecipient {
 /**
  * All token/vault escrows addressed to a recipient identity. Mirrors
  * `fetchEscrowsByRecipient` but for the 711-byte EscrowToken layout:
- * protocol byte at offset 115, recipient pubkey at offset 118.
+ * protocol byte at offset 117, recipient pubkey at offset 120 (post
+ * 3-byte SchemaVersion expansion in contracts state.rs::EscrowToken).
  */
 export async function fetchTokenEscrowsByRecipient(
   rpc: SolanaRpc,
@@ -584,8 +641,8 @@ export async function fetchTokenEscrowsByRecipient(
   const matchLen = recipientProtocol === 'ethereum' ? 20 : 32;
   const matchBytes = recipientBytes.slice(0, matchLen);
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 115, bytes: bs58.encode(new Uint8Array([protocolByte])) },
-    { offset: 118, bytes: bs58.encode(matchBytes) },
+    { offset: 117, bytes: bs58.encode(new Uint8Array([protocolByte])) }, // EscrowToken.recipient_protocol
+    { offset: 120, bytes: bs58.encode(matchBytes) }, // EscrowToken.recipient_pubkey
   ]);
   const results: TokenEscrowByRecipient[] = [];
   for (const { pubkey, data } of accounts) {

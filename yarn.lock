@@ -20,12 +20,12 @@
     jsonpointer "^5.0.1"
     leven "^3.1.0"
 
-"@ar.io/sdk@4.0.0-solana.14":
-  version "4.0.0-solana.14"
-  resolved "https://registry.yarnpkg.com/@ar.io/sdk/-/sdk-4.0.0-solana.14.tgz#b5eb5e2550b388f7ca7c2707a13d279f619f60c1"
-  integrity sha512-6Z1/4mclslBh2AZTK3rpHlYIVmX6McF5Y0t7fMEmmcj10deOJe+Mc6fGD7cWJUp2cQzwzOkozl4SqujEKtheQw==
+"@ar.io/sdk@4.0.0-solana.18":
+  version "4.0.0-solana.18"
+  resolved "https://registry.yarnpkg.com/@ar.io/sdk/-/sdk-4.0.0-solana.18.tgz#b2a0ecd1f84e4295f1f357b795fe66a97b0c18ae"
+  integrity sha512-bZEOr4OL3GWqEf1Bs94xQ4A4xGHRlsw8YLhBOuEGmUCJCtEW/yDW6VAmZQ27vcRvXoSxWxnSSYBWlN5c4MraoA==
   dependencies:
-    "@ar.io/solana-contracts" "0.1.0-devnet.0"
+    "@ar.io/solana-contracts" "^0.4.0"
     "@solana-program/compute-budget" "^0.15.0"
     "@solana-program/token" "^0.13.0"
     "@solana/kit" "^6.8.0"
@@ -47,10 +47,13 @@
     eventemitter3 "^5.0.1"
     prompts "^2.4.2"
 
-"@ar.io/solana-contracts@0.1.0-devnet.0":
-  version "0.1.0-devnet.0"
-  resolved "https://registry.yarnpkg.com/@ar.io/solana-contracts/-/solana-contracts-0.1.0-devnet.0.tgz#b03d1fd243b80665bd289232b335a25a22e3795a"
-  integrity sha512-MzdoB2lBHWNqGRi5Ki7a8legTv8YuoymwuahPSQr6lk75UMr7dMz5VWF2ypXLv2GJZODz69ChNSd/eTP7X4n8g==
+"@ar.io/solana-contracts@^0.4.0":
+  version "0.4.0"
+  resolved "https://registry.yarnpkg.com/@ar.io/solana-contracts/-/solana-contracts-0.4.0.tgz#f658a2bcb926451188302cbbcc4a1d1f49f875ee"
+  integrity sha512-rLQVlNS1YBJq2cG5xu9qOmWF0qOPiLXD0AGVlW2WFeNxIXLvDYiARXLJXQ26kvnfIED/Fx3X5cg7Y4m4L1ZF4A==
+  dependencies:
+    "@noble/hashes" "^1.5.0"
+    bs58 "^6.0.0"
 
 "@ardrive/turbo-sdk@^1.39.1":
   version "1.41.3"

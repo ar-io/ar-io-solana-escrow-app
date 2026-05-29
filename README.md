@@ -66,16 +66,26 @@ the network the page was loaded with. See
 
 The Deposit Tokens page transfers liquid ARIO tokens from the depositor's
 wallet into an escrow-owned token account. The Deposit Vault page escrows a
-time-locked vault position from `ario-core`.
+time-locked vault position from `ario-core` (non-revocable; the importer
+rejects revocable deposits — see ADR-021 / BD-105).
 
-**Vault claim behavior:** When a claimant claims an active vault (lock not
-yet expired), the app builds a transaction containing both the escrow
-`claim_vault_*` instruction and a sibling `ario_core::vaulted_transfer`
-instruction. The escrow program verifies the sibling instruction via
-`sysvar::instructions` introspection (same pattern as Solana's Ed25519
-precompile). Tokens transfer to the payer's ATA first, then the
-`vaulted_transfer` creates a time-locked vault for the claimant. Expired
-vaults are claimed as liquid SPL transfers (no `vaulted_transfer` needed).
+**Vault claim behavior:** vaults are claimable **only after their on-chain
+`vault_end_timestamp`**, at which point the escrow delivers liquid ARIO
+directly to the claimant's ATA. A claim attempted while the vault is still
+locked is rejected on-chain with `EscrowError::VaultStillLocked`; the SDK's
+`claimVault*` methods pre-flight the same gate and throw a clear
+"locked until `<unlock-time>`" error before building the tx. The Claim page
+disables the Submit button while the vault is locked and surfaces the
+unlock time so the user knows exactly when to return.
+
+The former "claim early, stay locked" re-lock path (a sibling
+`ario_core::vaulted_transfer` introspected by the escrow program) was
+removed because its introspection had no 1:1 binding between a claim and
+the re-lock it credited (lock-bypass / relayer-skim vector; Codex
+finding). The contracts repo ships a restoration playbook
+([`docs/RESTORE_ACTIVE_VAULT_RELOCK.md`](https://github.com/ar-io/ar-io-solana-contracts/blob/develop/docs/RESTORE_ACTIVE_VAULT_RELOCK.md))
+with the direct-CPI design to revive the feature safely if ever needed.
+See **ADR-022** / **BD-107** in the contracts repo.
 
 ## Components inherited from the registration app
 
