@@ -50,6 +50,12 @@ export {
   getEscrowAntPDA,
   getEscrowTokenPDA,
   getEscrowVaultPDA,
+  // Vault-claim pre-flight (ADR-022 / VaultStillLocked). Includes a
+  // forward CLOCK_SKEW_TOLERANCE_SECONDS buffer so wall vs cluster
+  // clock skew biases all races into the friendly direction.
+  isVaultClaimable,
+  assertVaultClaimable,
+  CLOCK_SKEW_TOLERANCE_SECONDS,
 } from '@ar.io/sdk/solana';
 export type {
   EscrowProtocol,
