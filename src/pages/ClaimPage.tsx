@@ -312,7 +312,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       const modulusBytes = parseArweaveRecipient(modulusB64Url);
       if (modulusBytes.length !== 512) {
         throw new Error(
-          `Wallet returned a non-4096-bit modulus (${modulusBytes.length * 8} bits). The escrow program only supports RSA-4096 keys.`,
+          'Your Arweave wallet uses an unsupported key type. Only RSA-4096 keys are supported.',
         );
       }
 
@@ -348,7 +348,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         throw new Error('Unexpected signMessage return format');
       }
       if (sig.length !== 512) {
-        throw new Error(`Expected 512-byte RSA-PSS signature, got ${sig.length} bytes`);
+        throw new Error('Invalid signature from wallet. Please try again.');
       }
       setSignature(sig);
       setArweaveModulus(modulusBytes);
@@ -450,7 +450,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           setArweaveModulus(null);
           throw new Error(
             'The escrow recipient was updated since you signed. ' +
-            'Your signature is no longer valid. Please sign again with the new nonce.',
+            'Your signature is no longer valid — the escrow was updated. Please sign again.',
           );
         }
 
@@ -518,7 +518,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           setArweaveModulus(null);
           throw new Error(
             'The escrow recipient was updated since you signed. ' +
-            'Your signature is no longer valid. Please sign again with the new nonce.',
+            'Your signature is no longer valid — the escrow was updated. Please sign again.',
           );
         }
 
@@ -654,19 +654,18 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
 
   return (
     <div style={styles.wrap}>
-      <h1 className="page-title" style={styles.h1}>Claim an escrow</h1>
+      <h1 className="page-title" style={styles.h1}>Claim your assets</h1>
       <p style={styles.lede}>
-        A depositor sent you an ANT or ARIO tokens. Connect your Arweave or
-        Ethereum wallet to sign the canonical message; the on-chain
-        verifier will release the asset to the Solana wallet you specify.
-        If someone shared a claim link with you, the identifier is already
-        filled in below.
+        Someone escrowed an ANT or ARIO tokens for you. Sign with your
+        Arweave or Ethereum wallet to release the assets to the Solana
+        wallet you specify. If you received a claim link, the identifier
+        is already filled in below.
       </p>
 
       <StepCard n={1} title="Escrow identifier" completed={hasEscrow}>
         <input
           type="text"
-          placeholder="ANT mint pubkey or escrow PDA address (base58)"
+          placeholder="ANT mint or escrow address"
           value={antMint}
           onChange={(e) => setAntMint(e.target.value)}
           className="input"
@@ -695,13 +694,13 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
               <span style={styles.escrowCardLabel}>Your identity type</span>
               <span style={styles.escrowCardValue}>
                 {escrowState.recipientProtocol === 'arweave'
-                  ? 'Arweave (RSA-PSS-4096)'
-                  : 'Ethereum (ECDSA secp256k1)'}
+                  ? 'Arweave'
+                  : 'Ethereum'}
               </span>
             </div>
             <p style={styles.escrowCardNote}>
-              To claim this ANT, connect the matching wallet below and sign
-              the canonical message.
+              To claim this ANT, connect the matching wallet below and
+              sign the authorization message.
             </p>
           </div>
         )}
@@ -743,13 +742,13 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
               <span style={styles.escrowCardLabel}>Your identity type</span>
               <span style={styles.escrowCardValue}>
                 {tokenState.recipientProtocol === 'arweave'
-                  ? 'Arweave (RSA-PSS-4096)'
-                  : 'Ethereum (ECDSA secp256k1)'}
+                  ? 'Arweave'
+                  : 'Ethereum'}
               </span>
             </div>
             <p style={styles.escrowCardNote}>
-              To claim this deposit, connect the matching wallet below and sign
-              the canonical message.
+              To claim this deposit, connect the matching wallet below
+              and sign the authorization message.
             </p>
           </div>
         )}
@@ -835,7 +834,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       <StepCard n={2} title="Solana destination wallet" completed={isValidClaimant} active={hasEscrow}>
         <input
           type="text"
-          placeholder="Solana pubkey that will receive the ANT"
+          placeholder="Solana wallet address"
           value={claimant}
           onChange={(e) => {
             setClaimant(e.target.value);
@@ -850,13 +849,12 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           style={styles.input}
         />
         <p style={styles.hint}>
-          This is the Solana wallet that will receive the ANT. The address is
-          cryptographically bound into the message you sign, so no one can
-          redirect it.
+          The Solana wallet that will receive your assets. This address is
+          locked into your signature — no one can redirect it.
         </p>
       </StepCard>
 
-      <StepCard n={3} title="Sign canonical message" completed={!!signature} active={isValidClaimant}>
+      <StepCard n={3} title="Sign authorization" completed={!!signature} active={isValidClaimant}>
         {/* Canonical message preview */}
         <pre style={styles.canonicalPreview}>
           {messagePreview
@@ -866,8 +864,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
               : '(fetch escrow state in step 1 to preview)'}
         </pre>
         <p style={styles.hint}>
-          Your wallet will sign exactly these bytes. For Ethereum wallets,
-          the standard personal_sign prefix is applied automatically.
+          Your wallet will sign this message to prove ownership.
         </p>
 
         {/* Source wallet connection */}
@@ -934,7 +931,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
             {signError && <p style={styles.errorHint}>{signError}</p>}
             {hasSignature && (
               <div style={styles.signatureConfirm}>
-                Signature captured ({signature!.length} bytes). Ready to submit.
+                Signature captured. Ready to submit.
               </div>
             )}
           </div>
@@ -944,7 +941,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       <StepCard n={4} title="Submit claim" completed={claimStatus === 'success'} active={!!signature}>
         {!hasSignature ? (
           <p style={styles.hint}>
-            Complete step 3 (sign the canonical message) to enable the claim button.
+            Complete step 3 to enable the claim button.
           </p>
         ) : (
           <>

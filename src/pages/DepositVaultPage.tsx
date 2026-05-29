@@ -251,7 +251,7 @@ export function DepositVaultPage() {
             }}
             onClick={() => setProtocol('arweave')}
           >
-            Arweave (RSA-PSS-4096)
+            Arweave
           </button>
           <button
             type="button"
@@ -261,7 +261,7 @@ export function DepositVaultPage() {
             }}
             onClick={() => setProtocol('ethereum')}
           >
-            Ethereum (ECDSA)
+            Ethereum
           </button>
         </div>
 

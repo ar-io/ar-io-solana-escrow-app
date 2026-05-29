@@ -11,7 +11,7 @@ export function LandingPage() {
     <div style={styles.wrap}>
       <h1 className="page-title" style={styles.h1}>ar.io Escrow</h1>
       <p style={styles.lede}>
-        Trustless asset escrow on Solana. Lock Arweave Name Tokens, ARIO
+        Trustless asset escrow on Solana. Lock ar.io Name Tokens (ANTs), ARIO
         tokens, or time-locked vaults and address them to an Arweave or
         Ethereum recipient. Claims are authorized by a single signature —
         verified entirely on-chain. No off-chain authority, no oracle, no
@@ -47,7 +47,7 @@ export function LandingPage() {
         <FlowCard
           icon={<FileSignature size={20} />}
           title="Claim"
-          desc="A depositor escrowed assets for you? Connect your Arweave or Ethereum wallet, sign the canonical message, and the assets land in your Solana wallet."
+          desc="Someone escrowed assets for you? Connect your Arweave or Ethereum wallet, sign to prove ownership, and the assets land in your Solana wallet."
           href="#/claim"
           cta="Claim →"
         />

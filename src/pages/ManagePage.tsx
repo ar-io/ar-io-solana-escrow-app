@@ -280,7 +280,7 @@ export function ManagePage({ antMint: initialAntMint }: Props) {
 
       setTxSignature(sig);
       setUpdateStatus('success');
-      setUpdateMessage('Recipient updated. Nonce has been rotated — any previous signatures are invalidated.');
+      setUpdateMessage('Recipient updated. Any previous claim authorizations are now invalid.');
 
       // Refresh escrow state
       fetchEscrow();
@@ -470,7 +470,7 @@ export function ManagePage({ antMint: initialAntMint }: Props) {
             ...defaultUpdateForm(prev[key]),
             status: 'success',
             message:
-              'Recipient updated. Nonce has been rotated — any previous signatures are invalidated.',
+              'Recipient updated. Any previous claim authorizations are now invalid.',
             sig,
           },
         }));
@@ -552,7 +552,7 @@ export function ManagePage({ antMint: initialAntMint }: Props) {
       <StepCard n={2} title="ANT mint" completed={!!escrowState} active={!!solPubkey}>
         <input
           type="text"
-          placeholder="ANT mint pubkey (base58)"
+          placeholder="ANT mint address"
           value={antMint}
           onChange={(e) => setAntMint(e.target.value)}
           className="input"
@@ -596,9 +596,8 @@ export function ManagePage({ antMint: initialAntMint }: Props) {
 
       <StepCard n={3} title="Update recipient" active={!!escrowState}>
         <p style={styles.hint}>
-          Re-targets the escrow at a new Arweave or Ethereum identity.
-          Rotates the on-chain nonce, invalidating any in-flight
-          signatures bound to the previous recipient.
+          Change the designated recipient to a new Arweave or Ethereum
+          identity. Any previous claim authorizations will no longer work.
         </p>
         <div style={styles.protocolPicker}>
           <button

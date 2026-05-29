@@ -159,10 +159,9 @@ export function DepositTokensPage() {
     <div style={styles.wrap}>
       <h1 className="page-title" style={styles.h1}>Deposit ARIO Tokens</h1>
       <p style={styles.lede}>
-        Lock ARIO tokens into the trustless escrow program. The recipient
-        — designated below — releases the tokens by signing a canonical
-        message that the on-chain verifier checks against their Arweave
-        or Ethereum public key.
+        Lock ARIO tokens into escrow. The recipient you designate below
+        can claim them by signing with their Arweave or Ethereum wallet —
+        verified entirely on-chain.
       </p>
 
       <StepCard n={1} title="Connect your Solana wallet" completed={!!solPubkey}>
@@ -190,8 +189,7 @@ export function DepositTokensPage() {
           </p>
         )}
         <p style={styles.hint}>
-          1 ARIO = 1,000,000 mARIO. Enter the amount in ARIO; the
-          conversion to mARIO (on-chain units) is shown above.
+          Enter the amount in ARIO.
         </p>
       </StepCard>
 
@@ -205,7 +203,7 @@ export function DepositTokensPage() {
             }}
             onClick={() => setProtocol('arweave')}
           >
-            Arweave (RSA-PSS-4096)
+            Arweave
           </button>
           <button
             type="button"
@@ -215,7 +213,7 @@ export function DepositTokensPage() {
             }}
             onClick={() => setProtocol('ethereum')}
           >
-            Ethereum (ECDSA)
+            Ethereum
           </button>
         </div>
 

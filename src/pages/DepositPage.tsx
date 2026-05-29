@@ -128,10 +128,9 @@ export function DepositPage() {
     <div style={styles.wrap}>
       <h1 className="page-title" style={styles.h1}>Deposit an ANT</h1>
       <p style={styles.lede}>
-        Lock one of your ANTs into the trustless escrow program. The
-        recipient — designated below — releases the ANT by signing a
-        canonical message that the on-chain verifier checks against their
-        Arweave or Ethereum public key.
+        Lock one of your ANTs into escrow. The recipient you designate
+        below can claim it by signing with their Arweave or Ethereum
+        wallet — verified entirely on-chain.
       </p>
 
       <StepCard n={1} title="Connect your Solana wallet" completed={!!solPubkey}>
@@ -145,7 +144,7 @@ export function DepositPage() {
       <StepCard n={2} title="Choose an ANT to deposit" completed={antMint.length > 30} active={!!solPubkey}>
         <input
           type="text"
-          placeholder="ANT mint pubkey (base58)"
+          placeholder="ANT mint address"
           value={antMint}
           onChange={(e) => setAntMint(e.target.value)}
           className="input"
@@ -173,7 +172,7 @@ export function DepositPage() {
             }}
             onClick={() => setProtocol('arweave')}
           >
-            Arweave (RSA-PSS-4096)
+            Arweave
           </button>
           <button
             type="button"
@@ -183,7 +182,7 @@ export function DepositPage() {
             }}
             onClick={() => setProtocol('ethereum')}
           >
-            Ethereum (ECDSA)
+            Ethereum
           </button>
         </div>
 

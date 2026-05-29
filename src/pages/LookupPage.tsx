@@ -39,7 +39,7 @@ export function LookupPage({ initialAntMint }: Props) {
 
   const handleLookup = useCallback(async () => {
     if (!antMint || antMint.length < 30) {
-      setError('Enter a valid escrow identifier (ANT mint or PDA address, base58).');
+      setError('Enter a valid ANT mint or escrow address.');
       return;
     }
 
