@@ -610,9 +610,17 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
               : await te.claimTokensArweaveIx(claimIxArgs);
 
           setClaimMessage('Waiting for wallet approval...');
+          // Ordering is load-bearing: the on-chain attested-claim handler
+          // requires the Ed25519Program ix at EXACTLY `claim_ix.index - 1`
+          // (see ario-ant-escrow `verify/attested.rs` +
+          // `test_claim_ant_arweave_attested_rejects_sigverify_not_immediately_preceding`).
+          // `createAtaIx` must therefore go BEFORE the sigverify, not between
+          // it and the claim, or the on-chain check rejects with
+          // `MissingAttestationInstruction`. Mirrors the working composition
+          // in solana-ar-io migration/import/escrow-claim-runner.ts.
           sig = await sendInstructions(rpc, rpcSubscriptions, signer, [
-            ed25519Ix,
             createAtaIx,
+            ed25519Ix,
             claimIx,
           ]);
         }
