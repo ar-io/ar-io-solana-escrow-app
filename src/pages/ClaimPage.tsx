@@ -24,6 +24,7 @@ import {
   buildEd25519SigverifyIx,
   buildCreateAtaIdempotentIx,
   getAtaForOwner,
+  isVaultClaimable,
   sendInstructions,
   ESCROW_TOKEN_ACCOUNT_SIZE,
   type EscrowAntState,
@@ -557,16 +558,14 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
             });
           }
         } else {
-          // --- Attested Arweave path ---
-          if (tokenState.assetType === 'vault') {
-            // The SDK's attested vault-claim ix isn't exposed for manual
-            // sigverify assembly (claimVaultArweave sends its own tx and
-            // can't accept a prepended Ed25519 ix). Tracked as an SDK
-            // follow-up; use an Ethereum recipient for vault escrows today.
-            throw new Error(
-              'Arweave vault claims are not yet supported (the SDK does not expose the attested vault-claim instruction for sigverify assembly). Use an Ethereum recipient, or claim once the SDK ships the attested-vault helper.',
-            );
-          }
+          // --- Attested Arweave path (token + vault) ---
+          // Vault claims work through the same attestor + Ed25519-sigverify
+          // composition as token claims since SDK 4.0.0-solana.20 exposed
+          // `claimVaultArweaveIx`. The on-chain handler reads the prepended
+          // Ed25519Program ix from `instructions_sysvar` to confirm the
+          // attestor signed the canonical claim message (ADR-017), then
+          // delivers liquid ARIO to `claimantTokenAccount` (active vaults
+          // are pre-flighted above via the SDK's `isVaultClaimable`).
 
           setClaimMessage('Requesting Ed25519 attestation from the attestor service...');
           const attestation = await attestor!.attest({
@@ -594,19 +593,34 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
             claimantAddr,
             arioMint,
           );
-          const claimIx = await te.claimTokensArweaveIx({
+          // Both `claimTokensArweaveIx` and `claimVaultArweaveIx` take the
+          // same args; the on-chain handler is selected by which builder
+          // (and therefore which Anchor discriminator) we use.
+          const claimIxArgs = {
             depositor: freshToken.depositor,
             assetId: freshToken.assetId,
             claimant: claimantAddr,
             claimantTokenAccount,
             escrowTokenAccount,
             messageNonce: tokenState.nonce,
-          });
+          };
+          const claimIx =
+            tokenState.assetType === 'vault'
+              ? await te.claimVaultArweaveIx(claimIxArgs)
+              : await te.claimTokensArweaveIx(claimIxArgs);
 
           setClaimMessage('Waiting for wallet approval...');
+          // Ordering is load-bearing: the on-chain attested-claim handler
+          // requires the Ed25519Program ix at EXACTLY `claim_ix.index - 1`
+          // (see ario-ant-escrow `verify/attested.rs` +
+          // `test_claim_ant_arweave_attested_rejects_sigverify_not_immediately_preceding`).
+          // `createAtaIx` must therefore go BEFORE the sigverify, not between
+          // it and the claim, or the on-chain check rejects with
+          // `MissingAttestationInstruction`. Mirrors the working composition
+          // in solana-ar-io migration/import/escrow-claim-runner.ts.
           sig = await sendInstructions(rpc, rpcSubscriptions, signer, [
-            ed25519Ix,
             createAtaIx,
+            ed25519Ix,
             claimIx,
           ]);
         }
@@ -647,13 +661,16 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const hasEscrow = !!escrowState || !!tokenState;
   const canSign = hasEscrow && isValidClaimant && !signing;
   // ADR-022: vaults are only claimable after `vault_end_timestamp`; a claim
-  // while still locked is rejected on-chain (`VaultStillLocked`) and the SDK
-  // throws pre-flight. Gate the Submit button to make the wait state explicit.
+  // while still locked is rejected on-chain (`VaultStillLocked`). We gate the
+  // Submit button via the SDK's `isVaultClaimable` helper, which adds the
+  // same forward CLOCK_SKEW_TOLERANCE_SECONDS buffer the SDK's pre-flight
+  // throws use — so the UI gate and the SDK's tx-build gate stay in lock-step
+  // and the user never sees a raw on-chain error from a half-baked tx.
   const vaultLocked =
     !!tokenState &&
     tokenState.assetType === 'vault' &&
     tokenState.vaultEndTimestamp > 0n &&
-    Number(tokenState.vaultEndTimestamp) * 1000 > Date.now();
+    !isVaultClaimable(tokenState);
   const canClaim =
     hasSignature && publicKey && claimStatus !== 'submitting' && !vaultLocked;
 
@@ -728,11 +745,11 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
             {tokenState.assetType === 'vault' && tokenState.vaultEndTimestamp > 0n && (
               <div style={styles.escrowCardRow}>
                 <span style={styles.escrowCardLabel}>
-                  {Number(tokenState.vaultEndTimestamp) * 1000 > Date.now() ? 'Locked until' : 'Lock expired'}
+                  {vaultLocked ? 'Locked until' : 'Lock expired'}
                 </span>
                 <span style={styles.escrowCardValue}>
                   {new Date(Number(tokenState.vaultEndTimestamp) * 1000).toLocaleString()}
-                  {Number(tokenState.vaultEndTimestamp) * 1000 > Date.now()
+                  {vaultLocked
                     ? ' — claim after this time to receive liquid ARIO'
                     : ' — you will receive liquid ARIO'}
                 </span>

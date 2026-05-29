@@ -20,10 +20,10 @@
     jsonpointer "^5.0.1"
     leven "^3.1.0"
 
-"@ar.io/sdk@4.0.0-solana.18":
-  version "4.0.0-solana.18"
-  resolved "https://registry.yarnpkg.com/@ar.io/sdk/-/sdk-4.0.0-solana.18.tgz#b2a0ecd1f84e4295f1f357b795fe66a97b0c18ae"
-  integrity sha512-bZEOr4OL3GWqEf1Bs94xQ4A4xGHRlsw8YLhBOuEGmUCJCtEW/yDW6VAmZQ27vcRvXoSxWxnSSYBWlN5c4MraoA==
+"@ar.io/sdk@4.0.0-solana.20":
+  version "4.0.0-solana.20"
+  resolved "https://registry.yarnpkg.com/@ar.io/sdk/-/sdk-4.0.0-solana.20.tgz#a325f9fce856e83cedec5603e76d082a1aa6717b"
+  integrity sha512-jIvKYVmS1473/G+Ox0NdOFUSxljdGngF0yGFs40/HeMqxOJ75ln6IUoDRSrsMt8Gh3P9YwYQagzbIJLhMlRDSQ==
   dependencies:
     "@ar.io/solana-contracts" "^0.4.0"
     "@solana-program/compute-budget" "^0.15.0"
