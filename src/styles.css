@@ -189,6 +189,29 @@
   background: rgba(84, 39, 200, 0.06);
 }
 
+/* Inline header nav (desktop, >= 400px) */
+.header-nav-link {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  padding: 7px 12px;
+  border-radius: 8px;
+  color: #6B6B78;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+
+.header-nav-link:hover {
+  background: #F0F0F0;
+  color: #23232D;
+}
+
+.header-nav-link--active {
+  color: #5427C8;
+  background: rgba(84, 39, 200, 0.06);
+}
+
 .menu-ext-link {
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-size: 13px;
@@ -411,6 +434,14 @@
 /* Connected wallet green dot pulse */
 .connected-dot {
   animation: pulse-dot 3s ease-in-out infinite;
+}
+
+/* Explore table row hover */
+.explore-row {
+  transition: background-color 0.12s ease;
+}
+.explore-row:hover {
+  background-color: rgba(84, 39, 200, 0.04);
 }
 
 /* Success banner entrance */

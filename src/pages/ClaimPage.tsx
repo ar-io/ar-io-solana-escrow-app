@@ -88,6 +88,14 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const { publicKey, wallet } = useWallet();
   const network: EscrowNetwork = getNetwork();
 
+  // Auto-fill the destination with the connected Solana wallet's address,
+  // unless the user has typed their own. Re-syncs if they switch wallets.
+  const claimantEditedRef = useRef(false);
+  useEffect(() => {
+    if (!publicKey || claimantEditedRef.current) return;
+    setClaimant(publicKey.toBase58());
+  }, [publicKey]);
+
   const connectedProtocol: 'arweave' | 'ethereum' | undefined = arweaveAddress
     ? 'arweave'
     : ethereumAddress
@@ -507,14 +515,34 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           type="text"
           placeholder="Solana wallet address"
           value={claimant}
-          onChange={(e) => setClaimant(e.target.value)}
+          onChange={(e) => {
+            // Once the user types, stop auto-syncing from the wallet — unless
+            // they clear the field, in which case re-enable auto-fill.
+            claimantEditedRef.current = e.target.value.trim().length > 0;
+            setClaimant(e.target.value);
+          }}
           className="input"
           style={styles.input}
           disabled={running}
         />
+        {publicKey && claimant !== publicKey.toBase58() && (
+          <button
+            type="button"
+            className="btn-text"
+            style={styles.useWalletBtn}
+            disabled={running}
+            onClick={() => {
+              claimantEditedRef.current = false;
+              setClaimant(publicKey.toBase58());
+            }}
+          >
+            Use connected wallet ({publicKey.toBase58().slice(0, 4)}…{publicKey.toBase58().slice(-4)})
+          </button>
+        )}
         <p style={styles.hint}>
-          The Solana wallet that will receive every asset you claim. This address
-          is locked into each signature — no one can redirect it.
+          The Solana wallet that will receive every asset you claim
+          {publicKey ? ' — pre-filled from your connected wallet' : ''}. This
+          address is locked into each signature — no one can redirect it.
         </p>
       </StepCard>
 
@@ -630,6 +658,13 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'monospace',
     outline: 'none',
     transition: 'border-color 0.15s, box-shadow 0.15s',
+  },
+  useWalletBtn: {
+    marginTop: '8px',
+    fontSize: '13px',
+    color: brand.primary,
+    fontWeight: 600,
+    padding: 0,
   },
   hint: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",

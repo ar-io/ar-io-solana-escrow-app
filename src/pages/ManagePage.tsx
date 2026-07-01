@@ -4,11 +4,15 @@ import { address } from '@solana/kit';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
+import { DepositPage } from './DepositPage.tsx';
+import { DepositTokensPage } from './DepositTokensPage.tsx';
+import { DepositVaultPage } from './DepositVaultPage.tsx';
 import {
   getAntEscrow,
   getTokenEscrow,
   getEscrowProgramId,
   getArioMint,
+  areDepositsEnabled,
   makeRpc,
 } from '../services/solana.ts';
 import {
@@ -60,6 +64,62 @@ function defaultUpdateForm(prev?: UpdateForm): UpdateForm {
 
 interface Props {
   antMint: string;
+  /** Which tab to open on mount (deep-linked from #/deposit* routes). */
+  initialTab?: TabId;
+}
+
+type TabId = 'manage' | 'deposit-ant' | 'deposit-tokens' | 'deposit-vault';
+
+/**
+ * Escrow hub. The "Manage" tab (update recipient / cancel) is always
+ * present; the deposit tabs (create ANT / token / vault escrows) are shown
+ * when deposits are enabled. Each deposit tab renders its standalone page
+ * component unchanged.
+ */
+export function ManagePage({ antMint, initialTab }: Props) {
+  const depositsOn = areDepositsEnabled();
+  const tabs: Array<{ id: TabId; label: string }> = [
+    { id: 'manage', label: 'Manage' },
+    ...(depositsOn
+      ? ([
+          { id: 'deposit-ant', label: 'Deposit ANT' },
+          { id: 'deposit-tokens', label: 'Deposit Tokens' },
+          { id: 'deposit-vault', label: 'Deposit Vault' },
+        ] as const)
+      : []),
+  ];
+  // Only honor a deposit initialTab when deposits are enabled.
+  const validInitial =
+    initialTab && tabs.some((t) => t.id === initialTab) ? initialTab : 'manage';
+  const [tab, setTab] = useState<TabId>(validInitial);
+
+  return (
+    <div style={styles.hubWrap}>
+      {tabs.length > 1 && (
+        <div style={styles.tabBar} role="tablist">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                ...styles.tab,
+                ...(tab === t.id ? styles.tabActive : {}),
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {tab === 'manage' && <ManageEscrowsTab antMint={antMint} />}
+      {tab === 'deposit-ant' && <DepositPage />}
+      {tab === 'deposit-tokens' && <DepositTokensPage />}
+      {tab === 'deposit-vault' && <DepositVaultPage />}
+    </div>
+  );
 }
 
 /**
@@ -67,7 +127,7 @@ interface Props {
  * cancel and pull the ANT back to your wallet. Only callable by the
  * original depositor; the program enforces this via `has_one = depositor`.
  */
-export function ManagePage({ antMint: initialAntMint }: Props) {
+function ManageEscrowsTab({ antMint: initialAntMint }: { antMint: string }) {
   const [antMint, setAntMint] = useState(initialAntMint);
   const [solPubkey, setSolPubkey] = useState<string | undefined>();
 
@@ -1057,6 +1117,40 @@ export function ManagePage({ antMint: initialAntMint }: Props) {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  hubWrap: {
+    maxWidth: '900px',
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+  },
+  tabBar: {
+    display: 'flex',
+    gap: '4px',
+    padding: '4px',
+    background: brand.cardSurface,
+    border: `1px solid ${brand.border}`,
+    borderRadius: '16px',
+    flexWrap: 'wrap' as const,
+    alignSelf: 'flex-start',
+  },
+  tab: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '14px',
+    fontWeight: 700,
+    padding: '9px 18px',
+    border: 'none',
+    borderRadius: '12px',
+    background: 'transparent',
+    color: brand.textSecondary,
+    cursor: 'pointer',
+    transition: 'all 0.15s',
+  },
+  tabActive: {
+    background: brand.white,
+    color: brand.black,
+    boxShadow: '0 1px 3px rgba(35, 35, 45, 0.08)',
+  },
   wrap: {
     maxWidth: '900px',
     width: '100%',

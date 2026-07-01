@@ -19,6 +19,7 @@ import {
   ANTEscrow,
   TokenEscrow,
   DEVNET_PROGRAM_IDS,
+  MAINNET_PROGRAM_IDS,
   DEVNET_ARIO_MINT,
   type EscrowNetwork,
 } from '@ar.io/sdk/solana';
@@ -63,6 +64,23 @@ export function getEscrowProgramId(): string | undefined {
 export function setEscrowProgramId(id: string): void {
   if (id) localStorage.setItem(PROGRAM_KEY, id);
   else localStorage.removeItem(PROGRAM_KEY);
+}
+
+/**
+ * The AR.IO program-id set (core/gar/arns/ant/antEscrow) for the active
+ * cluster, so we can reach sibling programs like ArNS. Keyed off the RPC
+ * URL's cluster — the program deployments are a property of the *cluster*,
+ * not the escrow app's network label. Returns undefined for custom/localnet
+ * endpoints where we don't know the deployed IDs (callers should degrade
+ * gracefully, e.g. skip ArNS-name enrichment). Prefer these when the
+ * configured escrow program id matches the cluster's `antEscrow`.
+ */
+export function getSolanaProgramIds(
+  rpcUrl: string = getRpcUrl(),
+): Record<'core' | 'gar' | 'arns' | 'ant' | 'antEscrow', Address> | undefined {
+  if (/devnet/.test(rpcUrl)) return DEVNET_PROGRAM_IDS;
+  if (/mainnet/.test(rpcUrl)) return MAINNET_PROGRAM_IDS;
+  return undefined;
 }
 
 /** Network string bound into the canonical claim message.

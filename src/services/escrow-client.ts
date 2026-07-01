@@ -47,6 +47,7 @@ export {
   canonicalMessage,
   canonicalMessageV2,
   bytesToHexLower,
+  deriveRecipientId,
   getEscrowAntPDA,
   getEscrowTokenPDA,
   getEscrowVaultPDA,
@@ -64,6 +65,7 @@ export type {
 import {
   canonicalMessage as _canonicalMessage,
   canonicalMessageV2 as _canonicalMessageV2,
+  deriveRecipientId as _deriveRecipientId,
   type CanonicalMessageInput,
   type CanonicalMessageV2Input,
   type EscrowProtocol,
@@ -294,6 +296,24 @@ export function formatRecipientPubkey(
   }
   const b64 = bytesToBase64url(pubkey);
   return b64.length > 24 ? `${b64.slice(0, 24)}...` : b64;
+}
+
+/** Canonical recipient identity for display: the checksummed-ish 0x address
+ *  for Ethereum, or the base64url Arweave address (sha256 of the RSA modulus)
+ *  for Arweave — the same value bound into the on-chain claim message. */
+export function formatRecipient(
+  protocol: EscrowProtocol,
+  pubkey: Uint8Array,
+): string {
+  if (protocol === 'ethereum') {
+    return (
+      '0x' +
+      Array.from(pubkey)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+    );
+  }
+  return _deriveRecipientId(pubkey);
 }
 
 /** Format mARIO (6 decimals) to a display ARIO string. */
@@ -545,6 +565,41 @@ export async function fetchAllEscrowsByDepositor(
     }
   }
   return results;
+}
+
+/** Every escrow on the program, split by kind. Used by the Explore page +
+ *  home-page stats — a full `getProgramAccounts` scan per discriminator. */
+export interface AllEscrows {
+  ants: Array<{ antMint: string; state: EscrowAntState }>;
+  tokens: TokenEscrowByRecipient[];
+}
+
+export async function fetchAllEscrows(
+  rpc: SolanaRpc,
+  programId: string,
+): Promise<AllEscrows> {
+  const [antAccts, tokenAccts] = await Promise.all([
+    scanProgram(rpc, programId, [{ offset: 0, bytes: ANT_DISCRIMINATOR_B58 }]),
+    scanProgram(rpc, programId, [{ offset: 0, bytes: TOKEN_DISCRIMINATOR_B58 }]),
+  ]);
+  const ants: AllEscrows['ants'] = [];
+  for (const { data } of antAccts) {
+    try {
+      const state = deserializeEscrowAnt(data);
+      ants.push({ antMint: state.antMint, state });
+    } catch {
+      /* skip malformed */
+    }
+  }
+  const tokens: TokenEscrowByRecipient[] = [];
+  for (const { pubkey, data } of tokenAccts) {
+    try {
+      tokens.push({ escrowPda: pubkey, state: deserializeEscrowToken(data) });
+    } catch {
+      /* skip malformed */
+    }
+  }
+  return { ants, tokens };
 }
 
 /** All ANT escrows addressed to a recipient identity. */
