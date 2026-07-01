@@ -65,8 +65,14 @@ export function setEscrowProgramId(id: string): void {
   else localStorage.removeItem(PROGRAM_KEY);
 }
 
-/** Network string bound into the canonical claim message. Overridable via
- *  `VITE_ESCROW_NETWORK`; otherwise inferred from the RPC URL. */
+/** Network string bound into the canonical claim message.
+ *
+ * `VITE_ESCROW_NETWORK` is AUTHORITATIVE when set. This string must equal the
+ * deployed program's compile-time `NETWORK` constant — which is independent of
+ * the cluster the RPC points at. A program built with `network-mainnet` but
+ * deployed to devnet expects `solana-mainnet` in the canonical message, so you
+ * set `VITE_ESCROW_NETWORK=solana-mainnet` even while the RPC is devnet. Only
+ * when the override is unset do we infer from the RPC URL. */
 export function getNetwork(rpcUrl: string = getRpcUrl()): EscrowNetwork {
   const override = import.meta.env.VITE_ESCROW_NETWORK as
     | EscrowNetwork

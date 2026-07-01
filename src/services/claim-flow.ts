@@ -1,0 +1,403 @@
+/**
+ * Single-escrow claim pipeline — sign the canonical message with the
+ * recipient wallet, then submit the Solana claim transaction.
+ *
+ * Extracted from `ClaimPage` so the page can run it over a *selection* of
+ * escrows (batch claiming). Each escrow has its own canonical message (bound
+ * to its asset id / nonce), so every asset needs its own recipient signature
+ * — there's no way to authorize several with one signature. This module
+ * claims exactly one; the page loops it and tracks per-item progress.
+ */
+import bs58 from 'bs58';
+import { address } from '@solana/kit';
+import {
+  fetchRawEscrowAccount,
+  deserializeEscrowToken,
+  canonicalMessage,
+  canonicalMessageV2,
+  formatMarioToArio,
+  buildEd25519SigverifyIx,
+  buildCreateAtaIdempotentIx,
+  getAtaForOwner,
+  sendInstructions,
+  ESCROW_TOKEN_ACCOUNT_SIZE,
+  type EscrowAntState,
+  type EscrowTokenState,
+  type EscrowNetwork,
+} from './escrow-client.ts';
+import {
+  getAntEscrow,
+  getTokenEscrow,
+  getWalletSigner,
+  getEscrowProgramId,
+  makeRpc,
+} from './solana.ts';
+import {
+  AttestorClient,
+  base64UrlToBytes,
+  bytesToBase64Url,
+  bytesToHexLower,
+  type AttestationResponse,
+} from './attestor-client.ts';
+
+/** A claimable escrow, keyed by the identifier a recipient uses to claim it
+ *  (ANT mint for ANT escrows; escrow PDA for token/vault escrows). */
+export type ClaimItem =
+  | { kind: 'ant'; id: string; state: EscrowAntState }
+  | { kind: 'token'; id: string; state: EscrowTokenState };
+
+/** Recipient protocol of an item. */
+export function itemProtocol(item: ClaimItem): 'arweave' | 'ethereum' {
+  return item.state.recipientProtocol;
+}
+
+/** Human label for an item (used in lists + result summaries). */
+export function itemLabel(item: ClaimItem): string {
+  if (item.kind === 'ant') return `ANT ${item.id}`;
+  const amount = formatMarioToArio(item.state.amount);
+  return item.state.assetType === 'vault'
+    ? `${amount} ARIO vault`
+    : `${amount} ARIO`;
+}
+
+export type ClaimPhase = 'signing' | 'submitting';
+
+export interface ClaimContext {
+  claimant: string;
+  network: EscrowNetwork;
+  /** Solana wallet adapter that pays fees + signs the claim tx. */
+  walletAdapter: unknown;
+  /** Injected EIP-1193 provider, required for Ethereum-recipient items. */
+  ethereumProvider?: unknown;
+  /** Attestor client, required for Arweave-recipient items. */
+  attestor: AttestorClient | null;
+  onPhase?: (phase: ClaimPhase, message: string) => void;
+}
+
+/**
+ * Build + sign the canonical claim message for one escrow with the
+ * recipient wallet (Arweave RSA-PSS or Ethereum ECDSA).
+ */
+async function signClaimMessage(
+  item: ClaimItem,
+  ctx: ClaimContext,
+): Promise<Uint8Array> {
+  const messageBytes =
+    item.kind === 'ant'
+      ? canonicalMessage({
+          network: ctx.network,
+          antMint: address(item.id),
+          claimant: address(ctx.claimant),
+          recipient: item.state.recipientPubkey,
+          nonce: item.state.nonce,
+        })
+      : canonicalMessageV2({
+          network: ctx.network,
+          assetType: item.state.assetType,
+          assetId: item.state.assetId,
+          amount: item.state.amount,
+          claimant: address(ctx.claimant),
+          recipient: item.state.recipientPubkey,
+          nonce: item.state.nonce,
+        });
+
+  if (item.state.recipientProtocol === 'arweave') {
+    const arweaveWallet = (window as any).arweaveWallet;
+    if (!arweaveWallet) throw new Error('Arweave wallet not connected.');
+    // Use `signature()` — a STANDARD single-hash RSA-PSS over the raw
+    // message — NOT `signMessage()`. `signMessage()` hashes the message and
+    // PSS-signs the digest, so PSS hashes it a second time (double-hash);
+    // the attestor and the on-chain sol_big_mod_exp verifier both do
+    // single-hash RSA-PSS over the message, so a `signMessage()` signature
+    // fails with RSA_SIGNATURE_INVALID. `saltLength: 32` matches the
+    // attestor payload + the contract. Requires the wallet's `SIGNATURE`
+    // permission (requested at connect time).
+    if (typeof arweaveWallet.signature !== 'function') {
+      throw new Error(
+        'Your Arweave wallet does not expose the signature() API needed for escrow claims. Reconnect Wander and grant the SIGNATURE permission.',
+      );
+    }
+    const raw = await arweaveWallet.signature(messageBytes, {
+      name: 'RSA-PSS',
+      saltLength: 32,
+    });
+    const sig =
+      raw instanceof Uint8Array
+        ? raw
+        : raw instanceof ArrayBuffer
+          ? new Uint8Array(raw)
+          : raw?.signature
+            ? new Uint8Array(raw.signature)
+            : null;
+    if (!sig) throw new Error('Unexpected signature() return format.');
+    if (sig.length !== 512) {
+      throw new Error('Invalid signature from wallet. Please try again.');
+    }
+    return sig;
+  }
+
+  // Ethereum: ethers personal_sign applies the EIP-191 prefix; the on-chain
+  // code re-applies it.
+  if (!ctx.ethereumProvider) throw new Error('Ethereum wallet not connected.');
+  const { BrowserProvider } = await import('ethers');
+  const provider = new BrowserProvider(ctx.ethereumProvider as any);
+  const signer = await provider.getSigner();
+  const sigHex = await signer.signMessage(new TextDecoder().decode(messageBytes));
+  return hexToBytes(sigHex);
+}
+
+/** Submit an ANT-escrow claim tx; returns the confirmed signature. */
+async function submitAntClaim(
+  state: EscrowAntState,
+  id: string,
+  signature: Uint8Array,
+  ctx: ClaimContext,
+): Promise<string> {
+  const freshState = await getAntEscrow({}).get(address(id));
+  if (!freshState) {
+    throw new Error(
+      'Escrow no longer exists — it may have been cancelled or already claimed.',
+    );
+  }
+  assertNonceUnchanged(freshState.nonce, state.nonce);
+
+  if (state.recipientProtocol === 'ethereum') {
+    ctx.onPhase?.('submitting', 'Waiting for wallet approval...');
+    return getAntEscrow({ adapter: ctx.walletAdapter }).claimEthereum({
+      antMint: address(id),
+      claimant: address(ctx.claimant),
+      signature,
+    });
+  }
+
+  // Attested Arweave path: attestor Ed25519 sigverify ix + claim ix.
+  ctx.onPhase?.('submitting', 'Requesting attestation...');
+  const attestation = await ctx.attestor!.attest({
+    claimKind: 'ant',
+    antMintBase58: id,
+    claimantBase58: ctx.claimant,
+    nonceHex: bytesToHexLower(state.nonce),
+    // The escrow's on-chain recipient pubkey IS the recipient's RSA modulus.
+    rsaModulusBase64Url: bytesToBase64Url(state.recipientPubkey),
+    rsaSignatureBase64Url: bytesToBase64Url(signature),
+    saltLength: 32,
+  });
+  logAttestedMessage(
+    attestation,
+    canonicalMessage({
+      network: ctx.network,
+      antMint: address(id),
+      claimant: address(ctx.claimant),
+      recipient: state.recipientPubkey,
+      nonce: state.nonce,
+    }),
+  );
+  const ed25519Ix = buildEd25519SigverifyIx(
+    bs58.decode(attestation.attestorPubkeyBase58),
+    base64UrlToBytes(attestation.attestationSignatureBase64Url),
+    base64UrlToBytes(attestation.canonicalMessageBase64Url),
+  );
+  const claimIx = await getAntEscrow({ adapter: ctx.walletAdapter }).claimArweaveIx({
+    antMint: address(id),
+    claimant: address(ctx.claimant),
+    depositor: freshState.depositor,
+    messageNonce: state.nonce,
+  });
+  ctx.onPhase?.('submitting', 'Waiting for wallet approval...');
+  const { rpc, rpcSubscriptions } = makeRpc();
+  return sendInstructions(
+    rpc,
+    rpcSubscriptions,
+    getWalletSigner(ctx.walletAdapter),
+    [ed25519Ix, claimIx],
+  );
+}
+
+/** Submit a token/vault-escrow claim tx; returns the confirmed signature. */
+async function submitTokenClaim(
+  state: EscrowTokenState,
+  id: string,
+  signature: Uint8Array,
+  ctx: ClaimContext,
+): Promise<string> {
+  const programId = getEscrowProgramId()!;
+  const { rpc, rpcSubscriptions } = makeRpc();
+  const rawAccount = await fetchRawEscrowAccount(rpc, id, programId);
+  if (!rawAccount || rawAccount.size !== ESCROW_TOKEN_ACCOUNT_SIZE) {
+    throw new Error(
+      'Escrow no longer exists — it may have been cancelled or already claimed.',
+    );
+  }
+  const freshToken = deserializeEscrowToken(rawAccount.data);
+  assertNonceUnchanged(freshToken.nonce, state.nonce);
+
+  const arioMint = freshToken.arioMint;
+  const claimantAddr = address(ctx.claimant);
+  const escrowPda = address(id);
+  const claimantTokenAccount = await getAtaForOwner(claimantAddr, arioMint);
+  const escrowTokenAccount = await getAtaForOwner(escrowPda, arioMint);
+  const te = getTokenEscrow({ adapter: ctx.walletAdapter });
+
+  if (state.recipientProtocol === 'ethereum') {
+    ctx.onPhase?.('submitting', 'Waiting for wallet approval...');
+    if (state.assetType === 'vault') {
+      return te.claimVaultEthereum({
+        depositor: freshToken.depositor,
+        assetId: freshToken.assetId,
+        claimant: claimantAddr,
+        claimantTokenAccount,
+        escrowTokenAccount,
+        signature,
+      });
+    }
+    return te.claimTokensEthereum({
+      depositor: freshToken.depositor,
+      assetId: freshToken.assetId,
+      claimant: claimantAddr,
+      claimantTokenAccount,
+      escrowTokenAccount,
+      signature,
+    });
+  }
+
+  // Attested Arweave path.
+  if (state.assetType === 'vault') {
+    throw new Error(
+      'Arweave vault claims are not yet supported. Use an Ethereum recipient for vault escrows.',
+    );
+  }
+  ctx.onPhase?.('submitting', 'Requesting attestation...');
+  const attestation = await ctx.attestor!.attest({
+    claimKind: state.assetType,
+    assetIdHex: bytesToHexLower(state.assetId),
+    amount: state.amount.toString(),
+    claimantBase58: ctx.claimant,
+    nonceHex: bytesToHexLower(state.nonce),
+    // The escrow's on-chain recipient pubkey IS the recipient's RSA modulus.
+    rsaModulusBase64Url: bytesToBase64Url(state.recipientPubkey),
+    rsaSignatureBase64Url: bytesToBase64Url(signature),
+    saltLength: 32,
+  });
+  logAttestedMessage(
+    attestation,
+    canonicalMessageV2({
+      network: ctx.network,
+      assetType: state.assetType,
+      assetId: state.assetId,
+      amount: state.amount,
+      claimant: address(ctx.claimant),
+      recipient: state.recipientPubkey,
+      nonce: state.nonce,
+    }),
+  );
+  const ed25519Ix = buildEd25519SigverifyIx(
+    bs58.decode(attestation.attestorPubkeyBase58),
+    base64UrlToBytes(attestation.attestationSignatureBase64Url),
+    base64UrlToBytes(attestation.canonicalMessageBase64Url),
+  );
+  const signer = getWalletSigner(ctx.walletAdapter);
+  const createAtaIx = buildCreateAtaIdempotentIx(
+    signer.address,
+    claimantTokenAccount,
+    claimantAddr,
+    arioMint,
+  );
+  const claimIx = await te.claimTokensArweaveIx({
+    depositor: freshToken.depositor,
+    assetId: freshToken.assetId,
+    claimant: claimantAddr,
+    claimantTokenAccount,
+    escrowTokenAccount,
+    messageNonce: state.nonce,
+  });
+  ctx.onPhase?.('submitting', 'Waiting for wallet approval...');
+  // ORDER MATTERS: the on-chain introspection (verify/attested.rs) requires
+  // the Ed25519 sigverify ix at exactly `claim_index - 1`. The create-ATA ix
+  // must therefore come BEFORE the sigverify ix, not between it and the claim
+  // — otherwise the claim's preceding ix is the ATA create and the program
+  // fails with MissingAttestationInstruction (6021).
+  return sendInstructions(rpc, rpcSubscriptions, signer, [
+    createAtaIx,
+    ed25519Ix,
+    claimIx,
+  ]);
+}
+
+/**
+ * Claim one escrow end-to-end: validate prerequisites, sign with the
+ * recipient wallet, then submit the Solana claim tx. Resolves with the
+ * confirmed tx signature, or throws with a user-facing message.
+ */
+export async function claimEscrowItem(
+  item: ClaimItem,
+  ctx: ClaimContext,
+): Promise<string> {
+  if (item.state.recipientProtocol === 'arweave' && !ctx.attestor) {
+    throw new Error(
+      'Arweave claims require the attestor service. Set VITE_ATTESTOR_URL and reload.',
+    );
+  }
+
+  ctx.onPhase?.('signing', 'Waiting for signature...');
+  const signature = await signClaimMessage(item, ctx);
+
+  return item.kind === 'ant'
+    ? submitAntClaim(item.state, item.id, signature, ctx)
+    : submitTokenClaim(item.state, item.id, signature, ctx);
+}
+
+/** Build the attestor client from env, or null if unconfigured. */
+export function makeAttestor(network: EscrowNetwork): AttestorClient | null {
+  const url = import.meta.env.VITE_ATTESTOR_URL as string | undefined;
+  return url ? new AttestorClient({ url, expectNetwork: network }) : null;
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Dev-only diagnostic: print the exact canonical message the attestor
+ * Ed25519-signed (the on-chain `claim_*_attested` ix compares THIS, byte for
+ * byte, against the message the program rebuilds — an `AttestationMessageMismatch`
+ * / 6024 means they differ). Compares it to the message we built locally with
+ * the page's network so a divergent `network:` line (e.g. the attestor signing
+ * `solana-mainnet` while reporting `solana-devnet` on /health, or the page on a
+ * different cluster than the program) is obvious in the console.
+ */
+function logAttestedMessage(
+  attestation: AttestationResponse,
+  expected: Uint8Array,
+): void {
+  if (!import.meta.env.DEV) return;
+  const dec = new TextDecoder();
+  const attestorMsg = dec.decode(
+    base64UrlToBytes(attestation.canonicalMessageBase64Url),
+  );
+  const expectedMsg = dec.decode(expected);
+  console.info('[attestor] message it signed:\n' + attestorMsg);
+  if (attestorMsg !== expectedMsg) {
+    console.warn(
+      '[attestor] MISMATCH — message the program/wallet expect (page network):\n' +
+        expectedMsg,
+    );
+  }
+}
+
+function assertNonceUnchanged(fresh: Uint8Array, signed: Uint8Array): void {
+  const same =
+    fresh.length === signed.length && fresh.every((b, i) => b === signed[i]);
+  if (!same) {
+    throw new Error(
+      'The escrow recipient was updated since you signed — your signature is no longer valid. Please claim again.',
+    );
+  }
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  let h = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (h.length % 2 !== 0) h = '0' + h;
+  const bytes = new Uint8Array(h.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}

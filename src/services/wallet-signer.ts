@@ -20,11 +20,9 @@ import {
   address,
   getTransactionEncoder,
   getTransactionDecoder,
-  signatureBytes,
   type Address,
-  type SignatureDictionary,
   type Transaction,
-  type TransactionPartialSigner,
+  type TransactionModifyingSigner,
 } from '@solana/kit';
 
 /** Wallet Standard chain identifier passed to the signing feature. */
@@ -70,14 +68,21 @@ export function canBridgeAdapter(adapter: unknown): boolean {
 }
 
 /**
- * Build a kit `TransactionPartialSigner` from a connected wallet-adapter
+ * Build a kit `TransactionModifyingSigner` from a connected wallet-adapter
  * adapter. Throws a clear error if the wallet can't sign raw transactions
  * via the Wallet Standard (e.g. a legacy, non-standard adapter).
+ *
+ * This MUST be a *modifying* signer, not a partial one: some wallets rewrite
+ * the transaction before signing (Phantom's Lighthouse guard appends
+ * assertion instructions), so the returned signature is valid only for the
+ * wallet's modified bytes. A partial signer that grafted that signature onto
+ * our original message would fail preflight with `SignatureFailure`. We
+ * therefore return the wallet's full signed transaction verbatim.
  */
 export function createWalletSigner(
   adapter: unknown,
   chain?: SolanaChain,
-): TransactionPartialSigner {
+): TransactionModifyingSigner {
   const a = adapter as StandardishAdapter | null;
 
   if (!a?.publicKey) {
@@ -110,12 +115,12 @@ export function createWalletSigner(
   const txEncoder = getTransactionEncoder();
   const txDecoder = getTransactionDecoder();
 
-  return {
+  const signer = {
     address: signerAddress,
-    async signTransactions(
+    async modifyAndSignTransactions(
       transactions: readonly Transaction[],
-    ): Promise<readonly SignatureDictionary[]> {
-      const out: SignatureDictionary[] = [];
+    ): Promise<readonly Transaction[]> {
+      const out: Transaction[] = [];
       for (const tx of transactions) {
         const wireBytes = new Uint8Array(txEncoder.encode(tx));
         const [{ signedTransaction }] = await feature.signTransaction({
@@ -124,14 +129,36 @@ export function createWalletSigner(
           ...(chain ? { chain } : {}),
         });
 
+        // Return the wallet's full signed transaction — it may differ from
+        // what we sent (e.g. Lighthouse guard instructions). Decoding and
+        // re-emitting the kit Transaction preserves those modifications so
+        // the submitted bytes match the signature.
         const decoded = txDecoder.decode(signedTransaction);
         const sig = decoded.signatures[signerAddress];
         if (!sig || sig.every((b) => b === 0)) {
           throw new Error('Wallet did not return a signature for this transaction.');
         }
-        out.push(Object.freeze({ [signerAddress]: signatureBytes(sig) }));
+        // Wire decoding drops kit's `lifetimeConstraint` annotation, but the
+        // blockhash-confirmation strategy (both our sendInstructions and the
+        // SDK's sendAndConfirm) reads `lifetimeConstraint.lastValidBlockHeight`
+        // post-send. Copy it from the input tx (the wallet preserves our
+        // blockhash; it only adds instructions) so confirmation doesn't throw
+        // on `undefined` after the tx has already landed.
+        const lifetimeConstraint = (
+          tx as { lifetimeConstraint?: unknown }
+        ).lifetimeConstraint;
+        out.push(
+          lifetimeConstraint
+            ? ({ ...decoded, lifetimeConstraint } as Transaction)
+            : decoded,
+        );
       }
       return out;
     },
   };
+
+  // kit brands modifying-signer output with compile-time `TransactionWithin
+  // SizeLimit`/`TransactionWithLifetime` markers that a freshly decoded
+  // transaction can't carry; they're runtime no-ops, so cast through unknown.
+  return signer as unknown as TransactionModifyingSigner;
 }
