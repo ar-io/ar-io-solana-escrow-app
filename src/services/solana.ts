@@ -30,6 +30,7 @@ export type { SolanaRpc, SolanaRpcSubscriptions } from '@ar.io/sdk/solana';
 const RPC_KEY = 'escrow-rpc-url';
 const PROGRAM_KEY = 'escrow-program-id';
 const ARIO_MINT_KEY = 'escrow-ario-mint';
+const CORE_PROGRAM_KEY = 'escrow-core-program-id';
 
 const MAINNET_RPC = 'https://api.mainnet-beta.solana.com';
 
@@ -41,9 +42,27 @@ export function getRpcUrl(): string {
   return import.meta.env.VITE_SOLANA_RPC_URL || MAINNET_RPC;
 }
 
-/** Derive the WebSocket subscriptions URL from the HTTP RPC URL. */
+/** Derive the WebSocket subscriptions URL from the HTTP RPC URL.
+ *
+ *  `VITE_SOLANA_WS_URL` overrides when set. Otherwise: swap the scheme,
+ *  and when the RPC URL carries an explicit port (local validators —
+ *  surfpool / solana-test-validator), bump it by 1 per the Solana
+ *  convention (RPC 8899 → WS 8900). Hosted endpoints without an explicit
+ *  port serve WS on the same URL and are unaffected. */
 export function getWsUrl(rpcUrl: string = getRpcUrl()): string {
-  return rpcUrl.replace(/^http(s?):\/\//, (_m, s) => (s ? 'wss://' : 'ws://'));
+  const override = import.meta.env.VITE_SOLANA_WS_URL as string | undefined;
+  if (override) return override;
+  const ws = rpcUrl.replace(/^http(s?):\/\//, (_m, s) => (s ? 'wss://' : 'ws://'));
+  try {
+    const u = new URL(ws);
+    if (u.port) {
+      u.port = String(Number(u.port) + 1);
+      return u.toString().replace(/\/$/, '');
+    }
+  } catch {
+    /* fall through to the plain scheme swap */
+  }
+  return ws;
 }
 
 /**
@@ -140,9 +159,29 @@ export function setArioMint(mint: string): void {
   else localStorage.removeItem(ARIO_MINT_KEY);
 }
 
-/** ario-core program id for the active network (needed for vault claims). */
-function coreProgramId(rpcUrl: string = getRpcUrl()): Address | undefined {
+/** ario-core program id for the active network (needed for vault claims —
+ *  the ADR-027 re-lock CPIs into ario-core). Resolution: localStorage
+ *  override → `VITE_ARIO_CORE_PROGRAM_ID` → devnet default for non-mainnet
+ *  RPCs. Custom clusters (localnet/surfpool) must set the override, since
+ *  their ario-core deployment differs from the public devnet one. */
+export function getCoreProgramId(rpcUrl: string = getRpcUrl()): Address | undefined {
+  const saved =
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem(CORE_PROGRAM_KEY)
+      : null;
+  if (saved) return address(saved);
+  const override = import.meta.env.VITE_ARIO_CORE_PROGRAM_ID as string | undefined;
+  if (override) return address(override);
   return /mainnet/.test(rpcUrl) ? undefined : DEVNET_PROGRAM_IDS.core;
+}
+
+export function setCoreProgramId(id: string): void {
+  if (id) localStorage.setItem(CORE_PROGRAM_KEY, id);
+  else localStorage.removeItem(CORE_PROGRAM_KEY);
+}
+
+function coreProgramId(rpcUrl: string = getRpcUrl()): Address | undefined {
+  return getCoreProgramId(rpcUrl);
 }
 
 export function makeRpc(rpcUrl: string = getRpcUrl()) {

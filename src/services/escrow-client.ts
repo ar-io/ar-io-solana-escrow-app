@@ -85,6 +85,8 @@ import {
   getEscrowTokenDecoder,
   ESCROW_ANT_DISCRIMINATOR,
   ESCROW_TOKEN_DISCRIMINATOR,
+  CLAIM_VAULT_ETHEREUM_DISCRIMINATOR,
+  CLAIM_VAULT_ARWEAVE_ATTESTED_DISCRIMINATOR,
 } from '@ar.io/solana-contracts/ant-escrow';
 
 // --- protocol constants (mirror the contract) ------------------------------
@@ -156,6 +158,194 @@ export function buildCreateAtaIdempotentIx(
       { address: address(SPL_TOKEN_PROGRAM_ID), role: AccountRole.READONLY },
     ],
     data: new Uint8Array([1]), // 1 = CreateIdempotent
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-027 vault claims — re-lock via direct CPI into ario-core
+// ---------------------------------------------------------------------------
+//
+// Still-locked vault claims re-lock into a native ario-core vault
+// (preserving the original unlock time) when the remaining lock is at
+// least ario-core's `min_vault_duration`; shorter remainders (and expired
+// vaults) deliver liquid. A still-locked claim must carry six trailing
+// optional accounts; the escrow program routes `payer == claimant`
+// through `create_vault` internally, so the account set is identical
+// either way. The SDK's `TokenEscrow` claim methods predate ADR-027
+// (they pre-flight the removed `VaultStillLocked` gate and omit the
+// re-lock accounts), so the app builds these two instructions itself.
+
+/** Solana `sysvar::instructions` id (Ed25519 attestation introspection). */
+const INSTRUCTIONS_SYSVAR_ID = 'Sysvar1nstructions1111111111111111111111111';
+
+const ARIO_CONFIG_SEED = 'ario_config';
+const VAULT_COUNTER_SEED = 'vault_counter';
+const VAULT_SEED = 'vault';
+
+/** Byte offset of `min_vault_duration: i64` inside `ArioConfig`:
+ *  disc(8) + authority(32) + mint(32) + arns_program(32) + treasury(32)
+ *  + total_supply(8) + protocol_balance(8) + circulating_supply(8)
+ *  + locked_supply(8) = 168. Fixed-offset read is safe here: the field
+ *  sits before every append-only extension point (ADR-020). */
+const ARIO_CONFIG_MIN_VAULT_DURATION_OFFSET = 168;
+
+/** Byte offset of `next_id: u64` inside `VaultCounter`: disc(8) + owner(32). */
+const VAULT_COUNTER_NEXT_ID_OFFSET = 40;
+
+/** The six trailing optional accounts a still-locked vault claim carries. */
+export interface VaultRelockAccounts {
+  payerTokenAccount: Address;
+  arioCoreConfig: Address;
+  recipientVaultCounter: Address;
+  vault: Address;
+  vaultTokenAccount: Address;
+  arioCoreProgram: Address;
+}
+
+/** ario-core `ArioConfig` PDA. */
+export async function getArioConfigPda(coreProgram: Address): Promise<Address> {
+  const [pda] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(ARIO_CONFIG_SEED)],
+  });
+  return pda;
+}
+
+/** Live `min_vault_duration` (seconds) from ario-core's config, or null when
+ *  the config account doesn't exist on this cluster. */
+export async function fetchMinVaultDuration(
+  rpc: SolanaRpc,
+  coreProgram: Address,
+): Promise<bigint | null> {
+  const configPda = await getArioConfigPda(coreProgram);
+  const { value } = await rpc
+    .getAccountInfo(configPda, { encoding: 'base64' })
+    .send();
+  if (!value) return null;
+  const data = Uint8Array.from(atob(value.data[0]), (c) => c.charCodeAt(0));
+  const view = new DataView(data.buffer, data.byteOffset);
+  return view.getBigInt64(ARIO_CONFIG_MIN_VAULT_DURATION_OFFSET, true);
+}
+
+/** The claimant's next vault id (0 when the counter doesn't exist yet). */
+export async function fetchNextVaultId(
+  rpc: SolanaRpc,
+  coreProgram: Address,
+  owner: Address,
+): Promise<bigint> {
+  const enc = getAddressEncoder();
+  const [counterPda] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(VAULT_COUNTER_SEED), enc.encode(owner)],
+  });
+  const { value } = await rpc
+    .getAccountInfo(counterPda, { encoding: 'base64' })
+    .send();
+  if (!value) return 0n;
+  const data = Uint8Array.from(atob(value.data[0]), (c) => c.charCodeAt(0));
+  const view = new DataView(data.buffer, data.byteOffset);
+  return view.getBigUint64(VAULT_COUNTER_NEXT_ID_OFFSET, true);
+}
+
+/** Derive the claimant's `VaultCounter` PDA and the `Vault` PDA for `vaultId`. */
+export async function deriveVaultPdas(
+  coreProgram: Address,
+  claimant: Address,
+  vaultId: bigint,
+): Promise<{ counter: Address; vault: Address }> {
+  const enc = getAddressEncoder();
+  const [counter] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(VAULT_COUNTER_SEED), enc.encode(claimant)],
+  });
+  const idBytes = new Uint8Array(8);
+  new DataView(idBytes.buffer).setBigUint64(0, vaultId, true);
+  const [vault] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(VAULT_SEED), enc.encode(claimant), idBytes],
+  });
+  return { counter, vault };
+}
+
+interface ClaimVaultBaseAccounts {
+  escrow: Address;
+  escrowTokenAccount: Address;
+  claimantTokenAccount: Address;
+  claimant: Address;
+  depositor: Address;
+  payer: Address;
+}
+
+function claimVaultAccountMetas(
+  base: ClaimVaultBaseAccounts,
+  withInstructionsSysvar: boolean,
+  relock?: VaultRelockAccounts,
+) {
+  const metas = [
+    { address: base.escrow, role: AccountRole.WRITABLE },
+    { address: base.escrowTokenAccount, role: AccountRole.WRITABLE },
+    { address: base.claimantTokenAccount, role: AccountRole.WRITABLE },
+    { address: base.claimant, role: AccountRole.READONLY },
+    { address: base.depositor, role: AccountRole.WRITABLE },
+    { address: base.payer, role: AccountRole.WRITABLE_SIGNER },
+    ...(withInstructionsSysvar
+      ? [{ address: address(INSTRUCTIONS_SYSVAR_ID), role: AccountRole.READONLY }]
+      : []),
+    { address: address(SPL_TOKEN_PROGRAM_ID), role: AccountRole.READONLY },
+    { address: address(SYSTEM_PROGRAM_ID), role: AccountRole.READONLY },
+  ];
+  if (relock) {
+    metas.push(
+      { address: relock.payerTokenAccount, role: AccountRole.WRITABLE },
+      { address: relock.arioCoreConfig, role: AccountRole.WRITABLE },
+      { address: relock.recipientVaultCounter, role: AccountRole.WRITABLE },
+      { address: relock.vault, role: AccountRole.WRITABLE },
+      { address: relock.vaultTokenAccount, role: AccountRole.WRITABLE },
+      { address: relock.arioCoreProgram, role: AccountRole.READONLY },
+    );
+  }
+  return metas;
+}
+
+/** `claim_vault_ethereum` instruction (args: message_nonce, signature).
+ *  Pass `relock` whenever the vault is still locked. */
+export function buildClaimVaultEthereumIx(
+  programId: Address,
+  accounts: ClaimVaultBaseAccounts,
+  messageNonce: Uint8Array,
+  signature: Uint8Array,
+  relock?: VaultRelockAccounts,
+): Instruction {
+  if (messageNonce.length !== 32) throw new Error('nonce must be 32 bytes');
+  if (signature.length !== 65) throw new Error('signature must be 65 bytes');
+  const data = new Uint8Array(8 + 32 + 65);
+  data.set(CLAIM_VAULT_ETHEREUM_DISCRIMINATOR as Uint8Array, 0);
+  data.set(messageNonce, 8);
+  data.set(signature, 40);
+  return {
+    programAddress: programId,
+    accounts: claimVaultAccountMetas(accounts, false, relock),
+    data,
+  };
+}
+
+/** `claim_vault_arweave_attested` instruction (args: message_nonce). The
+ *  Ed25519 attestation sigverify ix MUST immediately precede this one.
+ *  Pass `relock` whenever the vault is still locked. */
+export function buildClaimVaultArweaveAttestedIx(
+  programId: Address,
+  accounts: ClaimVaultBaseAccounts,
+  messageNonce: Uint8Array,
+  relock?: VaultRelockAccounts,
+): Instruction {
+  if (messageNonce.length !== 32) throw new Error('nonce must be 32 bytes');
+  const data = new Uint8Array(8 + 32);
+  data.set(CLAIM_VAULT_ARWEAVE_ATTESTED_DISCRIMINATOR as Uint8Array, 0);
+  data.set(messageNonce, 8);
+  return {
+    programAddress: programId,
+    accounts: claimVaultAccountMetas(accounts, true, relock),
+    data,
   };
 }
 
