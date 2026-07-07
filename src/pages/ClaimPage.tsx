@@ -370,6 +370,9 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   // -------------------------------------------------------------------
   const hasWallet = !!connectedProtocol;
   const successCount = Object.values(results).filter((r) => r.phase === 'success').length;
+  const allClaimed =
+    selectedClaimable.length > 0 &&
+    selectedClaimable.every((it) => results[it.id]?.phase === 'success');
   const canClaim =
     !!publicKey && isValidClaimant && selectedClaimable.length > 0 && !running;
 
@@ -550,11 +553,17 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       <StepCard
         n={3}
         title="Claim selected assets"
-        completed={successCount > 0 && successCount === selectedClaimable.length}
+        completed={allClaimed}
         active={isValidClaimant && selectedClaimable.length > 0}
       >
         {selectedClaimable.length === 0 ? (
           <p style={styles.hint}>Select at least one asset in step 1 to claim.</p>
+        ) : allClaimed ? (
+          <p style={styles.successHint}>
+            All {selectedClaimable.length} selected asset
+            {selectedClaimable.length === 1 ? '' : 's'} claimed. See each
+            asset's status in step 1.
+          </p>
         ) : (
           <>
             <p style={styles.hint}>
