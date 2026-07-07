@@ -1,129 +1,135 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { address } from '@solana/kit';
-import bs58 from 'bs58';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
 import { ArweaveWalletConnect } from '../components/ArweaveWalletConnect.tsx';
 import { EthereumWalletConnect } from '../components/EthereumWalletConnect.tsx';
 import {
-  fetchEscrowState,
   fetchEscrowsByRecipient,
   fetchTokenEscrowsByRecipient,
   fetchRawEscrowAccount,
   deserializeEscrowToken,
-  type TokenEscrowByRecipient,
   lookupArweaveModulus,
   parseArweaveRecipient,
-  canonicalMessage,
-  canonicalMessagePreview,
-  canonicalMessageV2,
-  canonicalMessageV2Preview,
-  formatMarioToArio,
-  buildEd25519SigverifyIx,
-  buildCreateAtaIdempotentIx,
-  getAtaForOwner,
-  sendInstructions,
+  isArweaveAddress,
   ESCROW_TOKEN_ACCOUNT_SIZE,
-  type EscrowAntState,
-  type EscrowTokenState,
   type EscrowNetwork,
 } from '../services/escrow-client.ts';
+import { getAntEscrow, getEscrowProgramId, getNetwork, makeRpc } from '../services/solana.ts';
 import {
-  getAntEscrow,
-  getTokenEscrow,
-  getWalletSigner,
-  getEscrowProgramId,
-  getNetwork,
-  makeRpc,
-} from '../services/solana.ts';
-import {
-  AttestorClient,
-  base64UrlToBytes,
-  bytesToBase64Url,
-  bytesToHexLower,
-} from '../services/attestor-client.ts';
+  claimEscrowItem,
+  makeAttestor,
+  itemProtocol,
+  itemLabel,
+  type ClaimItem,
+  type ClaimPhase,
+} from '../services/claim-flow.ts';
 
 interface Props {
   /** ANT mint or escrow PDA, optionally read from `?ant=<mint>` query string. */
   antMint: string;
 }
 
+type ItemResultPhase = 'queued' | ClaimPhase | 'success' | 'error';
+interface ItemResult {
+  phase: ItemResultPhase;
+  message?: string;
+  tx?: string;
+}
+
 /**
- * Recipient flow — verify the canonical message, sign with the
- * appropriate (Arweave or Ethereum) wallet, submit the claim tx.
+ * Recipient claim flow (batch).
  *
- * 1. User enters the ANT mint and their desired Solana destination.
- * 2. The page fetches the EscrowAnt PDA to determine recipient protocol
- *    and nonce, then renders the canonical message preview.
- * 3. The user connects their Arweave or Ethereum wallet and signs the
- *    canonical message.
- * 4. Anyone (fee payer) submits the claim tx with the signature.
+ * 1. Connect the Arweave/Ethereum wallet the assets were escrowed to — we
+ *    discover every escrow addressed to it (or accept a manual identifier).
+ * 2. Choose a Solana destination wallet (shared by all claims).
+ * 3. Select which assets to claim and run them: each is signed with the
+ *    recipient wallet and submitted as its own Solana tx, with per-item
+ *    progress. One signature per asset is unavoidable — each escrow's
+ *    authorization message is bound to its own asset id and nonce.
  */
 export function ClaimPage({ antMint: initialAntMint }: Props) {
   const [antMint, setAntMint] = useState(initialAntMint);
+  // Manual identifier entry starts expanded only when a claim link
+  // pre-filled an identifier, so any lookup error is visible.
+  const [showManual, setShowManual] = useState(!!initialAntMint);
   const [claimant, setClaimant] = useState('');
   const [solPubkey, setSolPubkey] = useState<string | undefined>();
 
-  // Escrow state from on-chain (ANT or token/vault — one will be set)
-  const [escrowState, setEscrowState] = useState<EscrowAntState | null>(null);
-  const [tokenState, setTokenState] = useState<EscrowTokenState | null>(null);
+  // Manual single-escrow resolution (feeds an item into the list).
+  const [manualItem, setManualItem] = useState<ClaimItem | null>(null);
   const [escrowLoading, setEscrowLoading] = useState(false);
   const [escrowError, setEscrowError] = useState('');
 
-  // Source wallet connection (for signing)
+  // Recipient wallet connection (for signing).
   const [arweaveAddress, setArweaveAddress] = useState<string | undefined>();
   const [ethereumAddress, setEthereumAddress] = useState<string | undefined>();
   const [ethereumProvider, setEthereumProvider] = useState<any>(undefined);
 
-  // Signature state
-  const [signature, setSignature] = useState<Uint8Array | null>(null);
-  // Arweave modulus captured at sign time. Required to POST to the
-  // attestor service alongside the RSA-PSS signature; the Ethereum
-  // path leaves this null and verifies on-chain via secp256k1_recover.
-  const [arweaveModulus, setArweaveModulus] = useState<Uint8Array | null>(null);
-  const [signError, setSignError] = useState('');
-  const [signing, setSigning] = useState(false);
+  // Recipient discovery.
+  const [recipientItems, setRecipientItems] = useState<ClaimItem[]>([]);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState('');
+  const [discoveryDone, setDiscoveryDone] = useState(false);
 
-  // Recipient discovery
-  const [recipientEscrows, setRecipientEscrows] = useState<
-    Array<{ antMint: string; state: EscrowAntState }>
-  >([]);
-  const [recipientTokenEscrows, setRecipientTokenEscrows] = useState<
-    TokenEscrowByRecipient[]
-  >([]);
-  const [recipientDiscoveryLoading, setRecipientDiscoveryLoading] = useState(false);
-  const [recipientDiscoveryError, setRecipientDiscoveryError] = useState('');
-  const [recipientDiscoveryDone, setRecipientDiscoveryDone] = useState(false);
-
-  // Claim submission state
-  const [claimStatus, setClaimStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
-  const [claimMessage, setClaimMessage] = useState('');
-  const [txSignature, setTxSignature] = useState('');
+  // Selection + per-item claim results.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [results, setResults] = useState<Record<string, ItemResult>>({});
+  const [running, setRunning] = useState(false);
 
   const { publicKey, wallet } = useWallet();
-
-  // Determine network from the configured RPC URL
   const network: EscrowNetwork = getNetwork();
 
+  // Auto-fill the destination with the connected Solana wallet's address,
+  // unless the user has typed their own. Re-syncs if they switch wallets.
+  const claimantEditedRef = useRef(false);
+  useEffect(() => {
+    if (!publicKey || claimantEditedRef.current) return;
+    setClaimant(publicKey.toBase58());
+  }, [publicKey]);
+
+  const connectedProtocol: 'arweave' | 'ethereum' | undefined = arweaveAddress
+    ? 'arweave'
+    : ethereumAddress
+      ? 'ethereum'
+      : undefined;
+
   // -------------------------------------------------------------------
-  // Fetch escrow state when ANT mint changes
+  // Manual identifier resolution
   // -------------------------------------------------------------------
   const fetchEscrow = useCallback(async () => {
-    if (!antMint || antMint.length < 30) {
-      setEscrowState(null);
-      setTokenState(null);
+    const id = antMint.trim();
+    if (!id || id.length < 30) {
+      setManualItem(null);
       setEscrowError('');
+      return;
+    }
+    if (isArweaveAddress(id)) {
+      setManualItem(null);
+      setEscrowError(
+        'That looks like an Arweave address. Connect your Arweave wallet above to find the assets escrowed for you — this field is for a Solana ANT mint or escrow account address.',
+      );
+      return;
+    }
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id)) {
+      setManualItem(null);
+      setEscrowError(
+        'That is not a valid Solana ANT mint or escrow address. Connect your wallet above to discover escrows automatically.',
+      );
       return;
     }
 
     setEscrowLoading(true);
     setEscrowError('');
-    setEscrowState(null);
-    setTokenState(null);
-    setSignature(null);
-
+    setManualItem(null);
     try {
       const programId = getEscrowProgramId();
       if (!programId) {
@@ -134,22 +140,18 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       }
       const { rpc } = makeRpc();
 
-      // First try as an ANT mint (the SDK derives the PDA + decodes).
-      const state = await getAntEscrow({}).get(address(antMint));
+      // Try as an ANT mint first (the SDK derives the PDA + decodes).
+      const state = await getAntEscrow({}).get(address(id));
       if (state) {
-        setEscrowState(state);
+        setManualItem({ kind: 'ant', id, state });
         return;
       }
-
-      // If not found as ANT, try fetching the address directly as a PDA
-      // (for token/vault escrows where the user pastes the PDA address).
-      const rawAccount = await fetchRawEscrowAccount(rpc, antMint, programId);
+      // Otherwise treat the identifier as a token/vault escrow PDA.
+      const rawAccount = await fetchRawEscrowAccount(rpc, id, programId);
       if (rawAccount && rawAccount.size === ESCROW_TOKEN_ACCOUNT_SIZE) {
-        const tState = deserializeEscrowToken(rawAccount.data);
-        setTokenState(tState);
+        setManualItem({ kind: 'token', id, state: deserializeEscrowToken(rawAccount.data) });
         return;
       }
-
       setEscrowError('No active escrow found for this identifier.');
     } catch (e) {
       setEscrowError(
@@ -161,66 +163,59 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   }, [antMint]);
 
   useEffect(() => {
-    if (antMint && antMint.length >= 32) {
-      fetchEscrow();
-    }
+    if (antMint && antMint.trim().length >= 32) fetchEscrow();
   }, [antMint, fetchEscrow]);
 
   // -------------------------------------------------------------------
-  // Auto-discover escrows addressed to connected source wallet
+  // Auto-discover escrows addressed to the connected recipient wallet
   // -------------------------------------------------------------------
   useEffect(() => {
-    const addr = arweaveAddress;
-    if (!addr) return;
-
+    if (!arweaveAddress) return;
     let cancelled = false;
     (async () => {
-      setRecipientDiscoveryLoading(true);
-      setRecipientDiscoveryError('');
+      setDiscoveryLoading(true);
+      setDiscoveryError('');
       try {
         const programId = getEscrowProgramId();
         if (!programId) throw new Error('No escrow program configured.');
         const { rpc } = makeRpc();
-        const modulus = await lookupArweaveModulus(addr);
-        const modulusBytes = parseArweaveRecipient(modulus);
+        const modulus = parseArweaveRecipient(await lookupArweaveModulus(arweaveAddress));
         const [ants, tokens] = await Promise.all([
-          fetchEscrowsByRecipient(rpc, 'arweave', modulusBytes, programId),
-          fetchTokenEscrowsByRecipient(rpc, 'arweave', modulusBytes, programId),
+          fetchEscrowsByRecipient(rpc, 'arweave', modulus, programId),
+          fetchTokenEscrowsByRecipient(rpc, 'arweave', modulus, programId),
         ]);
         if (!cancelled) {
-          setRecipientEscrows(ants);
-          setRecipientTokenEscrows(tokens);
-          setRecipientDiscoveryDone(true);
+          setRecipientItems([
+            ...ants.map((e): ClaimItem => ({ kind: 'ant', id: e.antMint, state: e.state })),
+            ...tokens.map((t): ClaimItem => ({ kind: 'token', id: t.escrowPda, state: t.state })),
+          ]);
+          setDiscoveryDone(true);
         }
       } catch (e) {
         if (!cancelled) {
-          setRecipientDiscoveryError(
-            `Could not look up escrows: ${e instanceof Error ? e.message : String(e)}. You can still enter an ANT mint manually above.`,
+          setDiscoveryError(
+            `Could not look up escrows: ${e instanceof Error ? e.message : String(e)}. You can still enter an identifier manually.`,
           );
-          setRecipientDiscoveryDone(true);
+          setDiscoveryDone(true);
         }
       } finally {
-        if (!cancelled) setRecipientDiscoveryLoading(false);
+        if (!cancelled) setDiscoveryLoading(false);
       }
     })();
     return () => { cancelled = true; };
   }, [arweaveAddress]);
 
   useEffect(() => {
-    const addr = ethereumAddress;
-    if (!addr) return;
-
+    if (!ethereumAddress) return;
     let cancelled = false;
     (async () => {
-      setRecipientDiscoveryLoading(true);
-      setRecipientDiscoveryError('');
+      setDiscoveryLoading(true);
+      setDiscoveryError('');
       try {
-        let hex = addr.trim();
+        let hex = ethereumAddress.trim();
         if (hex.startsWith('0x') || hex.startsWith('0X')) hex = hex.slice(2);
         const addrBytes = new Uint8Array(20);
-        for (let i = 0; i < 20; i++) {
-          addrBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-        }
+        for (let i = 0; i < 20; i++) addrBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
         const programId = getEscrowProgramId();
         if (!programId) throw new Error('No escrow program configured.');
         const { rpc } = makeRpc();
@@ -229,726 +224,354 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           fetchTokenEscrowsByRecipient(rpc, 'ethereum', addrBytes, programId),
         ]);
         if (!cancelled) {
-          setRecipientEscrows(ants);
-          setRecipientTokenEscrows(tokens);
-          setRecipientDiscoveryDone(true);
+          setRecipientItems([
+            ...ants.map((e): ClaimItem => ({ kind: 'ant', id: e.antMint, state: e.state })),
+            ...tokens.map((t): ClaimItem => ({ kind: 'token', id: t.escrowPda, state: t.state })),
+          ]);
+          setDiscoveryDone(true);
         }
       } catch (e) {
         if (!cancelled) {
-          setRecipientDiscoveryError(
-            `Could not look up escrows: ${e instanceof Error ? e.message : String(e)}. You can still enter an ANT mint manually above.`,
+          setDiscoveryError(
+            `Could not look up escrows: ${e instanceof Error ? e.message : String(e)}. You can still enter an identifier manually.`,
           );
-          setRecipientDiscoveryDone(true);
+          setDiscoveryDone(true);
         }
       } finally {
-        if (!cancelled) setRecipientDiscoveryLoading(false);
+        if (!cancelled) setDiscoveryLoading(false);
       }
     })();
     return () => { cancelled = true; };
   }, [ethereumAddress]);
 
-  // Reset discovery when source wallet disconnects
+  // Reset discovery when both recipient wallets disconnect.
   useEffect(() => {
     if (!arweaveAddress && !ethereumAddress) {
-      setRecipientEscrows([]);
-      setRecipientTokenEscrows([]);
-      setRecipientDiscoveryDone(false);
-      setRecipientDiscoveryError('');
+      setRecipientItems([]);
+      setDiscoveryDone(false);
+      setDiscoveryError('');
     }
   }, [arweaveAddress, ethereumAddress]);
 
-  // The active escrow (whichever type is loaded)
-  const activeProtocol = escrowState?.recipientProtocol ?? tokenState?.recipientProtocol;
-  const activeNonce = escrowState?.nonce ?? tokenState?.nonce;
-
   // -------------------------------------------------------------------
-  // Canonical message preview
+  // Unified item list (discovery + manual), deduped by identifier
   // -------------------------------------------------------------------
-  const messagePreview = (() => {
-    if (!claimant) return null;
-    if (escrowState) {
-      return canonicalMessagePreview({
-        network,
-        antMint: address(antMint),
-        claimant: address(claimant),
-        nonce: escrowState.nonce,
-      });
-    }
-    if (tokenState) {
-      return canonicalMessageV2Preview({
-        network,
-        assetType: tokenState.assetType,
-        assetId: tokenState.assetId,
-        amount: tokenState.amount,
-        claimant: address(claimant),
-        nonce: tokenState.nonce,
-      });
-    }
-    return null;
-  })();
+  const items = useMemo<ClaimItem[]>(() => {
+    const map = new Map<string, ClaimItem>();
+    for (const it of recipientItems) map.set(it.id, it);
+    if (manualItem) map.set(manualItem.id, manualItem);
+    return [...map.values()];
+  }, [recipientItems, manualItem]);
 
-  // -------------------------------------------------------------------
-  // Sign canonical message
-  // -------------------------------------------------------------------
-  const handleArweaveSign = useCallback(async () => {
-    if ((!escrowState && !tokenState) || !claimant) return;
-    setSigning(true);
-    setSignError('');
-
-    try {
-      const arweaveWallet = (window as any).arweaveWallet;
-      if (!arweaveWallet) throw new Error('Arweave wallet not connected');
-
-      // Fetch the wallet's RSA modulus (JWK "n" field, base64url) BEFORE
-      // building the canonical message. The on-chain canonical message
-      // includes a `recipient` field derived from
-      // `sha256(escrow.recipient_pubkey)`. The off-chain attestor
-      // builds the same field from this modulus. Mismatched modulus →
-      // divergent canonical → on-chain Ed25519 verify fails. (F-1)
-      const modulusB64Url: string = await arweaveWallet.getActivePublicKey();
-      if (!modulusB64Url || typeof modulusB64Url !== 'string') {
-        throw new Error('Wallet did not return an RSA public key');
+  // Default-select each item the first time it appears, but only if its
+  // protocol matches the connected wallet (so it's actually claimable).
+  // Respects later user deselection.
+  const seenIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const it of items) {
+        if (!seenIds.current.has(it.id)) {
+          seenIds.current.add(it.id);
+          if (itemProtocol(it) === connectedProtocol) next.add(it.id);
+        }
       }
-      const modulusBytes = parseArweaveRecipient(modulusB64Url);
-      if (modulusBytes.length !== 512) {
-        throw new Error(
-          'Your Arweave wallet uses an unsupported key type. Only RSA-4096 keys are supported.',
-        );
-      }
+      return next;
+    });
+  }, [items, connectedProtocol]);
 
-      const messageBytes = escrowState
-        ? canonicalMessage({
-            network,
-            antMint: address(antMint),
-            claimant: address(claimant),
-            nonce: escrowState.nonce,
-          })
-        : canonicalMessageV2({
-            network,
-            assetType: tokenState!.assetType,
-            assetId: tokenState!.assetId,
-            amount: tokenState!.amount,
-            claimant: address(claimant),
-            nonce: tokenState!.nonce,
-          });
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
-      // signMessage return shape varies by wallet:
-      // - Wander/ArConnect: Uint8Array (512 bytes)
-      // - Some wallets: ArrayBuffer
-      // - Some wallets: { signature: Uint8Array }
-      const raw = await arweaveWallet.signMessage(messageBytes);
-      let sig: Uint8Array;
-      if (raw instanceof Uint8Array) {
-        sig = raw;
-      } else if (raw instanceof ArrayBuffer) {
-        sig = new Uint8Array(raw);
-      } else if (raw?.signature) {
-        sig = new Uint8Array(raw.signature);
+  const claimableItems = useMemo(
+    () => items.filter((it) => itemProtocol(it) === connectedProtocol),
+    [items, connectedProtocol],
+  );
+  const selectedClaimable = useMemo(
+    () => claimableItems.filter((it) => selectedIds.has(it.id)),
+    [claimableItems, selectedIds],
+  );
+  const allClaimableSelected =
+    claimableItems.length > 0 && selectedClaimable.length === claimableItems.length;
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (claimableItems.every((it) => next.has(it.id))) {
+        for (const it of claimableItems) next.delete(it.id);
       } else {
-        throw new Error('Unexpected signMessage return format');
+        for (const it of claimableItems) next.add(it.id);
       }
-      if (sig.length !== 512) {
-        throw new Error('Invalid signature from wallet. Please try again.');
-      }
-      setSignature(sig);
-      setArweaveModulus(modulusBytes);
-    } catch (e) {
-      setSignError(
-        `Arweave signing failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setSigning(false);
-    }
-  }, [escrowState, tokenState, claimant, antMint, network]);
-
-  const handleEthereumSign = useCallback(async () => {
-    if ((!escrowState && !tokenState) || !claimant || !ethereumProvider) return;
-    setSigning(true);
-    setSignError('');
-
-    try {
-      const messageBytes = escrowState
-        ? canonicalMessage({
-            network,
-            antMint: address(antMint),
-            claimant: address(claimant),
-            nonce: escrowState.nonce,
-          })
-        : canonicalMessageV2({
-            network,
-            assetType: tokenState!.assetType,
-            assetId: tokenState!.assetId,
-            amount: tokenState!.amount,
-            claimant: address(claimant),
-            nonce: tokenState!.nonce,
-          });
-
-      // Use ethers to sign the message via the injected provider.
-      // personal_sign applies EIP-191 prefix automatically.
-      const { BrowserProvider } = await import('ethers');
-      const provider = new BrowserProvider(ethereumProvider);
-      const signer = await provider.getSigner();
-      const messageString = new TextDecoder().decode(messageBytes);
-      const sigHex = await signer.signMessage(messageString);
-
-      // Convert hex signature to 65-byte Uint8Array (r || s || v)
-      const sigBytes = hexToBytes(sigHex);
-      setSignature(sigBytes);
-    } catch (e) {
-      setSignError(
-        `Ethereum signing failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setSigning(false);
-    }
-  }, [escrowState, tokenState, claimant, antMint, network, ethereumProvider]);
+      return next;
+    });
+  }, [claimableItems]);
 
   // -------------------------------------------------------------------
-  // Submit claim transaction
+  // Run the batch claim
   // -------------------------------------------------------------------
-  const handleSubmitClaim = useCallback(async () => {
-    if ((!escrowState && !tokenState) || !claimant || !signature || !publicKey) return;
+  const isValidClaimant = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(claimant.trim());
 
-    setClaimStatus('submitting');
-    setClaimMessage('Verifying escrow state is still current...');
+  const runBatch = useCallback(async () => {
+    if (!publicKey || !isValidClaimant || selectedClaimable.length === 0) return;
+    setRunning(true);
 
-    try {
-      // Lazy-construct the attestor client so the Ethereum-only path
-      // doesn't break if VITE_ATTESTOR_URL is unset.
-      const attestorUrl = import.meta.env.VITE_ATTESTOR_URL as string | undefined;
-      const attestor = attestorUrl
-        ? new AttestorClient({
-            url: attestorUrl,
-            expectNetwork: network,
-          })
-        : null;
+    const attestor = makeAttestor(network);
+    const claimantTrim = claimant.trim();
 
-      const needsAttestor =
-        (escrowState && escrowState.recipientProtocol === 'arweave') ||
-        (tokenState && tokenState.recipientProtocol === 'arweave');
-      if (needsAttestor && !attestor) {
-        throw new Error(
-          'Arweave claims require the attestor service. Set VITE_ATTESTOR_URL in the environment and reload.',
-        );
-      }
-      if (needsAttestor && !arweaveModulus) {
-        throw new Error(
-          'Sign step did not capture an Arweave RSA modulus. Disconnect, reconnect, and sign again.',
-        );
-      }
+    // Seed every selected item as queued.
+    setResults((prev) => {
+      const next = { ...prev };
+      for (const it of selectedClaimable) next[it.id] = { phase: 'queued' };
+      return next;
+    });
 
-      if (escrowState) {
-        // --- ANT escrow claim ---
-        const freshState = await getAntEscrow({}).get(address(antMint));
-        if (!freshState) {
-          throw new Error('Escrow no longer exists — it may have been cancelled or already claimed.');
-        }
-        const nonceMatch = freshState.nonce.length === escrowState.nonce.length &&
-          freshState.nonce.every((b, i) => b === escrowState.nonce[i]);
-        if (!nonceMatch) {
-          setSignature(null);
-          setArweaveModulus(null);
-          throw new Error(
-            'The escrow recipient was updated since you signed. ' +
-            'Your signature is no longer valid — the escrow was updated. Please sign again.',
-          );
-        }
-
-        let sig: string;
-        if (escrowState.recipientProtocol === 'ethereum') {
-          // Verified on-chain via secp256k1_recover — single self-contained ix.
-          setClaimMessage('Waiting for wallet approval...');
-          sig = await getAntEscrow({ adapter: wallet?.adapter }).claimEthereum({
-            antMint: address(antMint),
-            claimant: address(claimant),
-            signature,
-          });
-        } else {
-          // --- Attested Arweave path: attestor Ed25519 sigverify ix + claim ix ---
-          setClaimMessage('Requesting Ed25519 attestation from the attestor service...');
-          const attestation = await attestor!.attest({
-            claimKind: 'ant',
-            antMintBase58: antMint,
-            claimantBase58: claimant,
-            nonceHex: bytesToHexLower(escrowState.nonce),
-            rsaModulusBase64Url: bytesToBase64Url(arweaveModulus!),
-            rsaSignatureBase64Url: bytesToBase64Url(signature),
-            saltLength: 32,
-          });
-
-          setClaimMessage('Building claim transaction...');
-          const ed25519Ix = buildEd25519SigverifyIx(
-            bs58.decode(attestation.attestorPubkeyBase58),
-            base64UrlToBytes(attestation.attestationSignatureBase64Url),
-            base64UrlToBytes(attestation.canonicalMessageBase64Url),
-          );
-          const claimIx = await getAntEscrow({ adapter: wallet?.adapter }).claimArweaveIx({
-            antMint: address(antMint),
-            claimant: address(claimant),
-            depositor: freshState.depositor,
-            messageNonce: escrowState.nonce,
-          });
-
-          setClaimMessage('Waiting for wallet approval...');
-          const { rpc, rpcSubscriptions } = makeRpc();
-          sig = await sendInstructions(
-            rpc,
-            rpcSubscriptions,
-            getWalletSigner(wallet?.adapter),
-            [ed25519Ix, claimIx],
-          );
-        }
-
-        setTxSignature(sig);
-        setClaimStatus('success');
-        setClaimMessage(`Claim confirmed! ANT ${antMint} has been released to ${claimant}.`);
-      } else if (tokenState) {
-        // --- Token/vault escrow claim ---
-        const programId = getEscrowProgramId()!;
-        const { rpc, rpcSubscriptions } = makeRpc();
-        const rawAccount = await fetchRawEscrowAccount(rpc, antMint, programId);
-        if (!rawAccount || rawAccount.size !== ESCROW_TOKEN_ACCOUNT_SIZE) {
-          throw new Error('Escrow no longer exists — it may have been cancelled or already claimed.');
-        }
-        const freshToken = deserializeEscrowToken(rawAccount.data);
-        const nonceMatch = freshToken.nonce.length === tokenState.nonce.length &&
-          freshToken.nonce.every((b, i) => b === tokenState.nonce[i]);
-        if (!nonceMatch) {
-          setSignature(null);
-          setArweaveModulus(null);
-          throw new Error(
-            'The escrow recipient was updated since you signed. ' +
-            'Your signature is no longer valid — the escrow was updated. Please sign again.',
-          );
-        }
-
-        const arioMint = freshToken.arioMint;
-        const claimantAddr = address(claimant);
-        // The user pastes the escrow PDA as the identifier for token/vault.
-        const escrowPda = address(antMint);
-        const claimantTokenAccount = await getAtaForOwner(claimantAddr, arioMint);
-        const escrowTokenAccount = await getAtaForOwner(escrowPda, arioMint);
-        const te = getTokenEscrow({ adapter: wallet?.adapter });
-        let sig: string;
-
-        if (tokenState.recipientProtocol === 'ethereum') {
-          // Verified on-chain via secp256k1_recover. The SDK auto-creates
-          // the claimant ATA and, for active vaults, bundles the sibling
-          // ario_core::vaulted_transfer ix.
-          setClaimMessage('Waiting for wallet approval...');
-          if (tokenState.assetType === 'vault') {
-            const payerTokenAccount = await getAtaForOwner(
-              getWalletSigner(wallet?.adapter).address,
-              arioMint,
-            );
-            sig = await te.claimVaultEthereum({
-              depositor: freshToken.depositor,
-              assetId: freshToken.assetId,
-              claimant: claimantAddr,
-              claimantTokenAccount,
-              escrowTokenAccount,
-              payerTokenAccount,
-              signature,
-            });
-          } else {
-            sig = await te.claimTokensEthereum({
-              depositor: freshToken.depositor,
-              assetId: freshToken.assetId,
-              claimant: claimantAddr,
-              claimantTokenAccount,
-              escrowTokenAccount,
-              signature,
-            });
-          }
-        } else {
-          // --- Attested Arweave path ---
-          if (tokenState.assetType === 'vault') {
-            // The SDK's attested vault-claim ix isn't exposed for manual
-            // sigverify assembly (claimVaultArweave sends its own tx and
-            // can't accept a prepended Ed25519 ix). Tracked as an SDK
-            // follow-up; use an Ethereum recipient for vault escrows today.
-            throw new Error(
-              'Arweave vault claims are not yet supported (the SDK does not expose the attested vault-claim instruction for sigverify assembly). Use an Ethereum recipient, or claim once the SDK ships the attested-vault helper.',
-            );
-          }
-
-          setClaimMessage('Requesting Ed25519 attestation from the attestor service...');
-          const attestation = await attestor!.attest({
-            claimKind: tokenState.assetType,
-            assetIdHex: bytesToHexLower(tokenState.assetId),
-            amount: tokenState.amount.toString(),
-            claimantBase58: claimant,
-            nonceHex: bytesToHexLower(tokenState.nonce),
-            rsaModulusBase64Url: bytesToBase64Url(arweaveModulus!),
-            rsaSignatureBase64Url: bytesToBase64Url(signature),
-            saltLength: 32,
-          });
-
-          setClaimMessage('Building claim transaction...');
-          const ed25519Ix = buildEd25519SigverifyIx(
-            bs58.decode(attestation.attestorPubkeyBase58),
-            base64UrlToBytes(attestation.attestationSignatureBase64Url),
-            base64UrlToBytes(attestation.canonicalMessageBase64Url),
-          );
-          const signer = getWalletSigner(wallet?.adapter);
-          // The lower-level *Ix doesn't auto-create the claimant ATA — do it.
-          const createAtaIx = buildCreateAtaIdempotentIx(
-            signer.address,
-            claimantTokenAccount,
-            claimantAddr,
-            arioMint,
-          );
-          const claimIx = await te.claimTokensArweaveIx({
-            depositor: freshToken.depositor,
-            assetId: freshToken.assetId,
-            claimant: claimantAddr,
-            claimantTokenAccount,
-            escrowTokenAccount,
-            messageNonce: tokenState.nonce,
-          });
-
-          setClaimMessage('Waiting for wallet approval...');
-          sig = await sendInstructions(rpc, rpcSubscriptions, signer, [
-            ed25519Ix,
-            createAtaIx,
-            claimIx,
-          ]);
-        }
-
-        setTxSignature(sig);
-        setClaimStatus('success');
-        const amountStr = formatMarioToArio(tokenState.amount);
-        setClaimMessage(
-          tokenState.assetType === 'vault'
-            ? `Claim confirmed! ${amountStr} ARIO vault has been released to ${claimant}.`
-            : `Claim confirmed! ${amountStr} ARIO has been released to ${claimant}.`,
-        );
-      }
-    } catch (e) {
-      setClaimStatus('error');
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes('User rejected') || msg.includes('user rejected')) {
-        setClaimMessage('Transaction cancelled by user.');
-      } else {
-        setClaimMessage(`Claim failed: ${msg}`);
+    for (const item of selectedClaimable) {
+      try {
+        const tx = await claimEscrowItem(item, {
+          claimant: claimantTrim,
+          network,
+          walletAdapter: wallet?.adapter,
+          ethereumProvider,
+          attestor,
+          onPhase: (phase, message) =>
+            setResults((prev) => ({ ...prev, [item.id]: { phase, message } })),
+        });
+        setResults((prev) => ({ ...prev, [item.id]: { phase: 'success', tx } }));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const friendly =
+          msg.includes('User rejected') || msg.includes('user rejected')
+            ? 'Cancelled in wallet.'
+            : msg;
+        setResults((prev) => ({ ...prev, [item.id]: { phase: 'error', message: friendly } }));
       }
     }
+
+    setRunning(false);
   }, [
-    escrowState,
-    tokenState,
-    claimant,
-    signature,
-    arweaveModulus,
     publicKey,
-    antMint,
-    wallet,
+    isValidClaimant,
+    selectedClaimable,
+    connectedProtocol,
     network,
+    wallet,
+    ethereumProvider,
+    claimant,
   ]);
 
-  const hasSignature = !!signature;
-  // Validate claimant is a plausible Solana base58 pubkey (32-44 chars, base58 alphabet)
-  const isValidClaimant = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(claimant.trim());
-  const hasEscrow = !!escrowState || !!tokenState;
-  const canSign = hasEscrow && isValidClaimant && !signing;
-  const canClaim = hasSignature && publicKey && claimStatus !== 'submitting';
+  // -------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------
+  const hasWallet = !!connectedProtocol;
+  const successCount = Object.values(results).filter((r) => r.phase === 'success').length;
+  const allClaimed =
+    selectedClaimable.length > 0 &&
+    selectedClaimable.every((it) => results[it.id]?.phase === 'success');
+  const canClaim =
+    !!publicKey && isValidClaimant && selectedClaimable.length > 0 && !running;
 
   return (
     <div style={styles.wrap}>
       <h1 className="page-title" style={styles.h1}>Claim your assets</h1>
       <p style={styles.lede}>
-        Someone escrowed an ANT or ARIO tokens for you. Sign with your
-        Arweave or Ethereum wallet to release the assets to the Solana
-        wallet you specify. If you received a claim link, the identifier
-        is already filled in below.
+        Someone escrowed ANTs or ARIO tokens for you. Connect the Arweave or
+        Ethereum wallet they were sent to, pick the assets to claim, and release
+        them to any Solana wallet you choose. Have a claim link? You can also
+        enter the identifier manually in step 1.
       </p>
 
-      <StepCard n={1} title="Escrow identifier" completed={hasEscrow}>
-        <input
-          type="text"
-          placeholder="ANT mint or escrow address"
-          value={antMint}
-          onChange={(e) => setAntMint(e.target.value)}
-          className="input"
-          style={styles.input}
-        />
-        {escrowLoading && (
-          <p style={styles.hint}>Loading escrow state...</p>
-        )}
-        {escrowError && (
-          <p style={styles.errorHint}>{escrowError}</p>
-        )}
-        {escrowState && (
-          <div style={styles.escrowCard}>
-            <h3 style={styles.escrowCardTitle}>An ANT has been deposited for you</h3>
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>ANT Mint</span>
-              <code style={styles.escrowCardValue}>{escrowState.antMint}</code>
-            </div>
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>Deposited by</span>
-              <code style={styles.escrowCardValue}>
-                {escrowState.depositor.slice(0, 8)}...{escrowState.depositor.slice(-4)}
-              </code>
-            </div>
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>Your identity type</span>
-              <span style={styles.escrowCardValue}>
-                {escrowState.recipientProtocol === 'arweave'
-                  ? 'Arweave'
-                  : 'Ethereum'}
-              </span>
-            </div>
-            <p style={styles.escrowCardNote}>
-              To claim this ANT, connect the matching wallet below and
-              sign the authorization message.
-            </p>
-          </div>
-        )}
-        {tokenState && (
-          <div style={styles.escrowCard}>
-            <h3 style={styles.escrowCardTitle}>
-              {tokenState.assetType === 'vault' ? 'A vaulted ARIO deposit' : 'An ARIO token deposit'} has been escrowed for you
-            </h3>
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>Amount</span>
-              <span style={styles.escrowCardValue}>{formatMarioToArio(tokenState.amount)} ARIO</span>
-            </div>
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>Type</span>
-              <span style={styles.escrowCardValue}>
-                {tokenState.assetType === 'vault' ? 'Vault (time-locked)' : 'Token'}
-              </span>
-            </div>
-            {tokenState.assetType === 'vault' && tokenState.vaultEndTimestamp > 0n && (
-              <div style={styles.escrowCardRow}>
-                <span style={styles.escrowCardLabel}>
-                  {Number(tokenState.vaultEndTimestamp) * 1000 > Date.now() ? 'Locked until' : 'Lock expired'}
-                </span>
-                <span style={styles.escrowCardValue}>
-                  {new Date(Number(tokenState.vaultEndTimestamp) * 1000).toLocaleString()}
-                  {Number(tokenState.vaultEndTimestamp) * 1000 > Date.now()
-                    ? ' — your tokens will be placed in a vault'
-                    : ' — you will receive liquid ARIO'}
-                </span>
-              </div>
-            )}
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>Deposited by</span>
-              <code style={styles.escrowCardValue}>
-                {tokenState.depositor.slice(0, 8)}...{tokenState.depositor.slice(-4)}
-              </code>
-            </div>
-            <div style={styles.escrowCardRow}>
-              <span style={styles.escrowCardLabel}>Your identity type</span>
-              <span style={styles.escrowCardValue}>
-                {tokenState.recipientProtocol === 'arweave'
-                  ? 'Arweave'
-                  : 'Ethereum'}
-              </span>
-            </div>
-            <p style={styles.escrowCardNote}>
-              To claim this deposit, connect the matching wallet below
-              and sign the authorization message.
-            </p>
-          </div>
-        )}
-      </StepCard>
+      {/* ---- Step 1: find assets ---- */}
+      <StepCard n={1} title="Find your escrowed assets" completed={items.length > 0}>
+        <p style={styles.hint}>
+          Connect the Arweave or Ethereum wallet your assets were sent to, and
+          we'll find everything waiting for you to claim.
+        </p>
 
-      {/* Recipient discovery: shown when a source wallet is connected */}
-      {(arweaveAddress || ethereumAddress) && (
-        <div style={styles.discoverySection}>
-          {recipientDiscoveryLoading && (
-            <p style={styles.discoveryLoading}>Checking for escrows addressed to your wallet...</p>
+        <div style={styles.connectStack}>
+          {(!connectedProtocol || connectedProtocol === 'arweave') && (
+            <ArweaveWalletConnect
+              onConnect={(addr) => setArweaveAddress(addr)}
+              onDisconnect={() => setArweaveAddress(undefined)}
+              connectedAddress={arweaveAddress}
+            />
           )}
-          {recipientDiscoveryError && (
-            <p style={styles.discoveryWarning}>{recipientDiscoveryError}</p>
-          )}
-          {recipientDiscoveryDone && !recipientDiscoveryError &&
-            recipientEscrows.length === 0 && recipientTokenEscrows.length === 0 && (
-            <p style={styles.hint}>
-              No escrows found for this wallet. If you have a claim link, paste the ANT mint or escrow address above.
-            </p>
-          )}
-          {(recipientEscrows.length > 0 || recipientTokenEscrows.length > 0) && (
-            <div style={styles.discoveryList}>
-              <p style={styles.discoveryTitle}>Escrows addressed to you</p>
-              {recipientEscrows.map((e) => (
-                <div key={e.antMint} style={styles.discoveryCard}>
-                  <div style={styles.discoveryCardRow}>
-                    <span style={styles.discoveryCardLabel}>ANT Mint</span>
-                    <code style={styles.discoveryCardValue}>
-                      {e.antMint.slice(0, 12)}...{e.antMint.slice(-4)}
-                    </code>
-                  </div>
-                  <div style={styles.discoveryCardRow}>
-                    <span style={styles.discoveryCardLabel}>Depositor</span>
-                    <code style={styles.discoveryCardValue}>
-                      {e.state.depositor.slice(0, 8)}...{e.state.depositor.slice(-4)}
-                    </code>
-                  </div>
-                  <button
-                    type="button"
-                    style={styles.discoveryClaimButton}
-                    onClick={() => setAntMint(e.antMint)}
-                  >
-                    Claim this ANT
-                  </button>
-                </div>
-              ))}
-              {recipientTokenEscrows.map((e) => (
-                <div key={e.escrowPda} style={styles.discoveryCard}>
-                  <div style={styles.discoveryCardRow}>
-                    <span style={styles.discoveryCardLabel}>
-                      {e.state.assetType === 'vault' ? 'Vault' : 'Tokens'}
-                    </span>
-                    <code style={styles.discoveryCardValue}>
-                      {formatMarioToArio(e.state.amount)} ARIO
-                    </code>
-                  </div>
-                  <div style={styles.discoveryCardRow}>
-                    <span style={styles.discoveryCardLabel}>Escrow</span>
-                    <code style={styles.discoveryCardValue}>
-                      {e.escrowPda.slice(0, 12)}...{e.escrowPda.slice(-4)}
-                    </code>
-                  </div>
-                  <div style={styles.discoveryCardRow}>
-                    <span style={styles.discoveryCardLabel}>Depositor</span>
-                    <code style={styles.discoveryCardValue}>
-                      {e.state.depositor.slice(0, 8)}...{e.state.depositor.slice(-4)}
-                    </code>
-                  </div>
-                  <button
-                    type="button"
-                    style={styles.discoveryClaimButton}
-                    onClick={() => setAntMint(e.escrowPda)}
-                  >
-                    Claim {e.state.assetType === 'vault' ? 'this vault' : 'these tokens'}
-                  </button>
-                </div>
-              ))}
-            </div>
+          {(!connectedProtocol || connectedProtocol === 'ethereum') && (
+            <EthereumWalletConnect
+              onConnect={(addr, provider) => {
+                setEthereumAddress(addr);
+                setEthereumProvider(provider);
+              }}
+              onDisconnect={() => {
+                setEthereumAddress(undefined);
+                setEthereumProvider(undefined);
+              }}
+              connectedAddress={ethereumAddress}
+            />
           )}
         </div>
-      )}
 
-      <StepCard n={2} title="Solana destination wallet" completed={isValidClaimant} active={hasEscrow}>
+        {hasWallet && (
+          <div style={styles.discoverySection}>
+            {discoveryLoading && (
+              <p style={styles.discoveryLoading}>Checking for assets escrowed to your wallet...</p>
+            )}
+            {discoveryError && <p style={styles.discoveryWarning}>{discoveryError}</p>}
+            {discoveryDone && !discoveryError && items.length === 0 && (
+              <p style={styles.hint}>
+                No assets found escrowed to this wallet. If you have a claim link,
+                paste the identifier below.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Item checklist */}
+        {items.length > 0 && (
+          <div style={styles.itemList}>
+            <div style={styles.itemListHeader}>
+              <span style={styles.discoveryTitle}>
+                {claimableItems.length} claimable asset{claimableItems.length === 1 ? '' : 's'}
+              </span>
+              {claimableItems.length > 1 && (
+                <button type="button" className="btn-text" onClick={toggleSelectAll}>
+                  {allClaimableSelected ? 'Deselect all' : 'Select all'}
+                </button>
+              )}
+            </div>
+            {items.map((it) => {
+              const claimable = itemProtocol(it) === connectedProtocol;
+              const result = results[it.id];
+              return (
+                <label
+                  key={it.id}
+                  style={{
+                    ...styles.itemCard,
+                    opacity: claimable ? 1 : 0.55,
+                    cursor: claimable && !running ? 'pointer' : 'default',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(it.id)}
+                    disabled={!claimable || running}
+                    onChange={() => toggleSelected(it.id)}
+                    style={styles.checkbox}
+                  />
+                  <div style={styles.itemBody}>
+                    <span style={styles.itemTitle}>{itemLabel(it)}</span>
+                    <code style={styles.itemSub}>
+                      {it.kind === 'ant' ? 'ANT' : it.state.assetType === 'vault' ? 'Vault' : 'Tokens'}
+                      {' · '}
+                      {it.id.slice(0, 10)}…{it.id.slice(-4)}
+                      {' · from '}
+                      {it.state.depositor.slice(0, 6)}…{it.state.depositor.slice(-4)}
+                    </code>
+                    {!claimable && (
+                      <span style={styles.itemNote}>
+                        Connect this asset's {itemProtocol(it)} wallet to claim it.
+                      </span>
+                    )}
+                    {result && <ResultBadge result={result} />}
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Manual fallback */}
+        <details
+          style={styles.manualDetails}
+          open={showManual}
+          onToggle={(e) => setShowManual((e.target as HTMLDetailsElement).open)}
+        >
+          <summary style={styles.manualSummary}>
+            Have a claim link or escrow address? Enter it manually
+          </summary>
+          <input
+            type="text"
+            placeholder="ANT mint or escrow address"
+            value={antMint}
+            onChange={(e) => setAntMint(e.target.value)}
+            className="input"
+            style={{ ...styles.input, marginTop: '12px' }}
+          />
+          {escrowLoading && <p style={styles.hint}>Loading escrow state...</p>}
+          {escrowError && <p style={styles.errorHint}>{escrowError}</p>}
+        </details>
+      </StepCard>
+
+      {/* ---- Step 2: destination ---- */}
+      <StepCard
+        n={2}
+        title="Solana destination wallet"
+        completed={isValidClaimant}
+        active={items.length > 0}
+      >
         <input
           type="text"
           placeholder="Solana wallet address"
           value={claimant}
           onChange={(e) => {
+            // Once the user types, stop auto-syncing from the wallet — unless
+            // they clear the field, in which case re-enable auto-fill.
+            claimantEditedRef.current = e.target.value.trim().length > 0;
             setClaimant(e.target.value);
-            // Signature is bound to the claimant address — invalidate
-            // if the address changes so the user must re-sign.
-            if (signature) {
-              setSignature(null);
-              setArweaveModulus(null);
-            }
           }}
           className="input"
           style={styles.input}
+          disabled={running}
         />
-        <p style={styles.hint}>
-          The Solana wallet that will receive your assets. This address is
-          locked into your signature — no one can redirect it.
-        </p>
-      </StepCard>
-
-      <StepCard n={3} title="Sign authorization" completed={!!signature} active={isValidClaimant}>
-        {/* Canonical message preview */}
-        <pre style={styles.canonicalPreview}>
-          {messagePreview
-            ? messagePreview
-            : hasEscrow
-              ? '(enter your Solana destination above to preview the message)'
-              : '(fetch escrow state in step 1 to preview)'}
-        </pre>
-        <p style={styles.hint}>
-          Your wallet will sign this message to prove ownership.
-        </p>
-
-        {/* Source wallet connection */}
-        {hasEscrow && (
-          <div style={{ marginTop: '16px' }}>
-            {activeProtocol === 'arweave' ? (
-              <>
-                <ArweaveWalletConnect
-                  onConnect={(addr) => setArweaveAddress(addr)}
-                  onDisconnect={() => {
-                    setArweaveAddress(undefined);
-                    setSignature(null);
-                    setArweaveModulus(null);
-                  }}
-                  connectedAddress={arweaveAddress}
-                />
-                {arweaveAddress && !hasSignature && (
-                  <button
-                    type="button"
-                    style={{
-                      ...styles.signButton,
-                      opacity: canSign ? 1 : 0.6,
-                      cursor: canSign ? 'pointer' : 'not-allowed',
-                      marginTop: '12px',
-                    }}
-                    disabled={!canSign}
-                    onClick={handleArweaveSign}
-                  >
-                    {signing ? 'Signing...' : 'Sign with Arweave wallet'}
-                  </button>
-                )}
-              </>
-            ) : (
-              <>
-                <EthereumWalletConnect
-                  onConnect={(addr, provider) => {
-                    setEthereumAddress(addr);
-                    setEthereumProvider(provider);
-                  }}
-                  onDisconnect={() => {
-                    setEthereumAddress(undefined);
-                    setEthereumProvider(undefined);
-                    setSignature(null);
-                  }}
-                  connectedAddress={ethereumAddress}
-                />
-                {ethereumAddress && !hasSignature && (
-                  <button
-                    type="button"
-                    style={{
-                      ...styles.signButton,
-                      opacity: canSign ? 1 : 0.6,
-                      cursor: canSign ? 'pointer' : 'not-allowed',
-                      marginTop: '12px',
-                    }}
-                    disabled={!canSign}
-                    onClick={handleEthereumSign}
-                  >
-                    {signing ? 'Signing...' : 'Sign with Ethereum wallet'}
-                  </button>
-                )}
-              </>
-            )}
-            {signError && <p style={styles.errorHint}>{signError}</p>}
-            {hasSignature && (
-              <div style={styles.signatureConfirm}>
-                Signature captured. Ready to submit.
-              </div>
-            )}
-          </div>
+        {publicKey && claimant !== publicKey.toBase58() && (
+          <button
+            type="button"
+            className="btn-text"
+            style={styles.useWalletBtn}
+            disabled={running}
+            onClick={() => {
+              claimantEditedRef.current = false;
+              setClaimant(publicKey.toBase58());
+            }}
+          >
+            Use connected wallet ({publicKey.toBase58().slice(0, 4)}…{publicKey.toBase58().slice(-4)})
+          </button>
         )}
+        <p style={styles.hint}>
+          The Solana wallet that will receive every asset you claim
+          {publicKey ? ' — pre-filled from your connected wallet' : ''}. This
+          address is locked into each signature — no one can redirect it.
+        </p>
       </StepCard>
 
-      <StepCard n={4} title="Submit claim" completed={claimStatus === 'success'} active={!!signature}>
-        {!hasSignature ? (
-          <p style={styles.hint}>
-            Complete step 3 to enable the claim button.
+      {/* ---- Step 3: claim ---- */}
+      <StepCard
+        n={3}
+        title="Claim selected assets"
+        completed={allClaimed}
+        active={isValidClaimant && selectedClaimable.length > 0}
+      >
+        {selectedClaimable.length === 0 ? (
+          <p style={styles.hint}>Select at least one asset in step 1 to claim.</p>
+        ) : allClaimed ? (
+          <p style={styles.successHint}>
+            All {selectedClaimable.length} selected asset
+            {selectedClaimable.length === 1 ? '' : 's'} claimed. See each
+            asset's status in step 1.
           </p>
         ) : (
           <>
             <p style={styles.hint}>
-              Connect a Solana wallet to submit the claim transaction.
-              Anyone can be the fee payer — the ANT goes to the claimant
-              address above regardless.
+              Connect a Solana wallet to pay the network fee and submit the
+              claims. You'll approve each asset in your {connectedProtocol} wallet
+              ({selectedClaimable.length} signature
+              {selectedClaimable.length === 1 ? '' : 's'}) — every asset is
+              authorized separately.
             </p>
             <div style={{ margin: '12px 0' }}>
               <SolanaWalletConnect
@@ -957,38 +580,6 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
                 connectedPubkey={solPubkey}
               />
             </div>
-          </>
-        )}
-
-        {claimStatus === 'success' ? (
-          <div style={styles.successBox}>
-            <p style={styles.successText}>{claimMessage}</p>
-            {txSignature && (
-              <p style={styles.txLink}>
-                <a
-                  href={`https://explorer.solana.com/tx/${txSignature}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={styles.link}
-                >
-                  View on Explorer
-                </a>
-              </p>
-            )}
-          </div>
-        ) : claimStatus === 'error' ? (
-          <div style={styles.errorBox}>
-            <p style={styles.errorText}>{claimMessage}</p>
-            <button
-              type="button"
-              style={{ ...styles.submit, opacity: 1 }}
-              onClick={handleSubmitClaim}
-            >
-              Retry Claim
-            </button>
-          </div>
-        ) : hasSignature ? (
-          <>
             <button
               type="button"
               className="btn-primary"
@@ -998,42 +589,59 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
                 cursor: canClaim ? 'pointer' : 'not-allowed',
               }}
               disabled={!canClaim}
-              onClick={handleSubmitClaim}
+              onClick={runBatch}
             >
-              {claimStatus === 'submitting' ? 'Submitting claim...' : 'Submit claim'}
+              {running
+                ? 'Claiming…'
+                : `Claim ${selectedClaimable.length} asset${selectedClaimable.length === 1 ? '' : 's'}`}
             </button>
-            {claimStatus === 'submitting' && (
-              <p style={styles.statusText}>{claimMessage}</p>
+            {successCount > 0 && (
+              <p style={styles.successHint}>
+                {successCount} of {selectedClaimable.length} claimed. Progress is
+                shown on each asset in step 1.
+              </p>
             )}
           </>
-        ) : null}
+        )}
       </StepCard>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
-function hexToBytes(hex: string): Uint8Array {
-  let h = hex.startsWith('0x') ? hex.slice(2) : hex;
-  if (h.length % 2 !== 0) h = '0' + h;
-  const bytes = new Uint8Array(h.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+function ResultBadge({ result }: { result: ItemResult }) {
+  if (result.phase === 'success') {
+    return (
+      <span style={{ ...styles.badge, ...styles.badgeSuccess }}>
+        ✓ Claimed
+        {result.tx && (
+          <a
+            href={`https://explorer.solana.com/tx/${result.tx}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={styles.badgeLink}
+          >
+            View
+          </a>
+        )}
+      </span>
+    );
   }
-  return bytes;
+  if (result.phase === 'error') {
+    return <span style={{ ...styles.badge, ...styles.badgeError }}>✕ {result.message}</span>;
+  }
+  const label =
+    result.phase === 'queued'
+      ? 'Queued…'
+      : result.phase === 'signing'
+        ? result.message || 'Awaiting signature…'
+        : result.message || 'Submitting…';
+  return <span style={{ ...styles.badge, ...styles.badgePending }}>{label}</span>;
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  wrap: {
-    maxWidth: '900px',
-    width: '100%',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '24px',
-  },
+  wrap: { maxWidth: '900px', width: '100%', display: 'flex', flexDirection: 'column', gap: '24px' },
   h1: {
     fontFamily: "'Besley', Georgia, serif",
     fontSize: '40px',
@@ -1060,6 +668,13 @@ const styles: Record<string, React.CSSProperties> = {
     outline: 'none',
     transition: 'border-color 0.15s, box-shadow 0.15s',
   },
+  useWalletBtn: {
+    marginTop: '8px',
+    fontSize: '13px',
+    color: brand.primary,
+    fontWeight: 600,
+    padding: 0,
+  },
   hint: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     fontSize: '13px',
@@ -1070,7 +685,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     fontSize: '13px',
     color: brand.success,
-    margin: '8px 0 0',
+    margin: '10px 0 0',
+    fontWeight: 600,
   },
   errorHint: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
@@ -1078,93 +694,92 @@ const styles: Record<string, React.CSSProperties> = {
     color: brand.error,
     margin: '8px 0 0',
   },
-  escrowCard: {
+  connectStack: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '12px',
     marginTop: '12px',
-    padding: '24px',
+  },
+  discoverySection: { marginTop: '16px' },
+  discoveryLoading: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '13px',
+    color: brand.textTertiary,
+    margin: 0,
+    fontStyle: 'italic' as const,
+  },
+  discoveryWarning: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '13px',
+    color: brand.textTertiary,
+    margin: 0,
+  },
+  discoveryTitle: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '14px',
+    fontWeight: 700,
+    color: brand.black,
+  },
+  itemList: {
+    marginTop: '16px',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '8px',
+  },
+  itemListHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: '4px',
+  },
+  itemCard: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '12px',
+    padding: '14px 16px',
     background: `radial-gradient(ellipse 140% 120% at top left, rgba(84, 39, 200, 0.03), transparent), rgba(255, 255, 255, 0.85)`,
     border: `1px solid ${brand.border}`,
     borderRadius: '16px',
     boxShadow: '0 1px 3px rgba(35, 35, 45, 0.04)',
   },
-  escrowCardTitle: {
+  checkbox: { width: '17px', height: '17px', marginTop: '2px', flexShrink: 0, accentColor: brand.primary },
+  itemBody: { display: 'flex', flexDirection: 'column' as const, gap: '3px', minWidth: 0, flex: 1 },
+  itemTitle: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '16px',
+    fontSize: '15px',
     fontWeight: 700,
     color: brand.black,
-    margin: '0 0 16px',
   },
-  escrowCardRow: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '2px',
-    marginBottom: '10px',
-  },
-  escrowCardLabel: {
+  itemSub: { fontSize: '12px', color: brand.textTertiary, fontFamily: 'monospace', wordBreak: 'break-all' as const },
+  itemNote: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '11px',
-    fontWeight: 700,
+    fontSize: '12px',
     color: brand.textTertiary,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
+    marginTop: '2px',
   },
-  escrowCardValue: {
-    fontSize: '13px',
-    color: brand.black,
-    fontFamily: 'monospace',
-    wordBreak: 'break-all' as const,
-  },
-  escrowCardNote: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '13px',
-    lineHeight: 1.5,
-    color: brand.textSecondary,
-    margin: '14px 0 0',
-    paddingTop: '12px',
-    borderTop: `1px solid ${brand.border}`,
-  },
-  code: {
-    fontFamily: 'monospace',
+  badge: {
+    marginTop: '6px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '8px',
+    alignSelf: 'flex-start',
+    padding: '4px 10px',
+    borderRadius: '12px',
     fontSize: '12px',
-    background: 'rgba(84, 39, 200, 0.06)',
-    padding: '2px 6px',
-    borderRadius: '4px',
-    margin: '0 4px',
-    color: brand.black,
-  },
-  canonicalPreview: {
-    background: brand.cardSurface,
-    border: `1px solid ${brand.border}`,
-    borderRadius: '16px',
-    padding: '16px',
-    fontSize: '12px',
-    fontFamily: 'monospace',
-    margin: 0,
-    whiteSpace: 'pre-wrap' as const,
-    wordBreak: 'break-all' as const,
-    overflow: 'auto',
-  },
-  signButton: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    padding: '10px 18px',
-    border: 'none',
-    borderRadius: '16px',
-    background: brand.primary,
-    color: brand.white,
-    fontSize: '14px',
-    fontWeight: 700,
-    cursor: 'pointer',
-    transition: 'all 0.2s ease',
-  },
-  signatureConfirm: {
-    marginTop: '12px',
-    padding: '10px 14px',
-    background: brand.successBg,
-    border: `1px solid ${brand.success}33`,
-    borderRadius: '16px',
-    fontSize: '13px',
-    color: brand.success,
     fontWeight: 600,
     fontFamily: "'Plus Jakarta Sans', sans-serif",
+  },
+  badgePending: { background: brand.cardSurface, color: brand.textSecondary },
+  badgeSuccess: { background: brand.successBg, color: brand.success },
+  badgeError: { background: brand.errorBg, color: brand.error },
+  badgeLink: { color: brand.primary, textDecoration: 'none', fontWeight: 700 },
+  manualDetails: { marginTop: '16px', paddingTop: '14px', borderTop: `1px solid ${brand.border}` },
+  manualSummary: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '13px',
+    fontWeight: 600,
+    color: brand.textSecondary,
+    cursor: 'pointer',
   },
   submit: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
@@ -1177,113 +792,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: 'pointer',
     transition: 'all 0.2s ease',
-  },
-  statusText: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '13px',
-    color: brand.primary,
-    marginTop: '8px',
-  },
-  successBox: {
-    padding: '16px',
-    background: brand.successBg,
-    borderRadius: '16px',
-    border: `1px solid ${brand.success}33`,
-  },
-  successText: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '14px',
-    color: brand.success,
-    fontWeight: 600,
-    margin: 0,
-  },
-  txLink: {
-    fontSize: '13px',
-    margin: '8px 0 0',
-  },
-  errorBox: {
-    padding: '14px 16px',
-    background: brand.errorBg,
-    borderRadius: '16px',
-    border: `1px solid ${brand.error}33`,
-  },
-  errorText: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '14px',
-    color: brand.error,
-    margin: '0 0 12px',
-  },
-  link: { color: brand.primary, textDecoration: 'none' },
-  discoverySection: {
-    marginTop: '-8px',
-  },
-  discoveryLoading: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '13px',
-    color: brand.textTertiary,
-    margin: '0',
-    fontStyle: 'italic' as const,
-  },
-  discoveryWarning: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '13px',
-    color: brand.textTertiary,
-    margin: '0',
-  },
-  discoveryList: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '8px',
-  },
-  discoveryTitle: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '14px',
-    fontWeight: 700,
-    color: brand.black,
-    margin: '0 0 4px',
-  },
-  discoveryCard: {
-    padding: '16px 20px',
-    background: `radial-gradient(ellipse 140% 120% at top left, rgba(84, 39, 200, 0.03), transparent), rgba(255, 255, 255, 0.85)`,
-    border: `1px solid ${brand.border}`,
-    borderRadius: '16px',
-    boxShadow: '0 1px 3px rgba(35, 35, 45, 0.04)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '16px',
-    flexWrap: 'wrap' as const,
-  },
-  discoveryCardRow: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '2px',
-    minWidth: '120px',
-  },
-  discoveryCardLabel: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '11px',
-    fontWeight: 700,
-    color: brand.textTertiary,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px',
-  },
-  discoveryCardValue: {
-    fontSize: '13px',
-    color: brand.black,
-    fontFamily: 'monospace',
-    wordBreak: 'break-all' as const,
-  },
-  discoveryClaimButton: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    padding: '8px 16px',
-    border: `1px solid ${brand.border}`,
-    borderRadius: '16px',
-    background: brand.cardSurface,
-    color: brand.black,
-    fontSize: '13px',
-    fontWeight: 600,
-    cursor: 'pointer',
-    marginLeft: 'auto',
-    transition: 'all 0.15s',
   },
 };

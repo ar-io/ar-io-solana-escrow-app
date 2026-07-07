@@ -22,3 +22,7 @@ yarn-error.log*
 
 # Test coverage
 coverage/
+/.ario-deploy
+
+# Ad-hoc localnet validation scripts (hardcode session-specific addresses)
+.localnet-*.mts

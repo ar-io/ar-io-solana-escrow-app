@@ -47,6 +47,7 @@ export {
   canonicalMessage,
   canonicalMessageV2,
   bytesToHexLower,
+  deriveRecipientId,
   getEscrowAntPDA,
   getEscrowTokenPDA,
   getEscrowVaultPDA,
@@ -64,6 +65,7 @@ export type {
 import {
   canonicalMessage as _canonicalMessage,
   canonicalMessageV2 as _canonicalMessageV2,
+  deriveRecipientId as _deriveRecipientId,
   type CanonicalMessageInput,
   type CanonicalMessageV2Input,
   type EscrowProtocol,
@@ -72,11 +74,30 @@ import {
   type EscrowAssetType,
 } from '@ar.io/sdk/solana';
 
+// Codama-generated account decoders + discriminators for the deployed
+// `ario-ant-escrow` program. Used for raw `getProgramAccounts` discovery
+// (the SDK only fetches single accounts by PDA). Decoding via the generated
+// codec — instead of hand-rolled byte offsets — keeps this in lockstep with
+// the on-chain layout: the v1→v3 schema-version expansion silently shifted
+// every field after `version` by 2 bytes and broke the old offset math.
+import {
+  getEscrowAntDecoder,
+  getEscrowTokenDecoder,
+  ESCROW_ANT_DISCRIMINATOR,
+  ESCROW_TOKEN_DISCRIMINATOR,
+  CLAIM_VAULT_ETHEREUM_DISCRIMINATOR,
+  CLAIM_VAULT_ARWEAVE_ATTESTED_DISCRIMINATOR,
+} from '@ar.io/solana-contracts/ant-escrow';
+
 // --- protocol constants (mirror the contract) ------------------------------
 export const ESCROW_PROTOCOL_ARWEAVE = 0;
 export const ESCROW_PROTOCOL_ETHEREUM = 1;
 export const ESCROW_ARWEAVE_PUBKEY_LEN = 512;
 export const ESCROW_ETHEREUM_PUBKEY_LEN = 20;
+
+/** EscrowToken `asset_type` enum byte (mirrors the contract). */
+export const ESCROW_ASSET_TYPE_TOKEN = 1;
+export const ESCROW_ASSET_TYPE_VAULT = 2;
 
 export const ESCROW_ANT_SEED = 'escrow_ant';
 export const ESCROW_TOKEN_SEED = 'escrow_token';
@@ -137,6 +158,194 @@ export function buildCreateAtaIdempotentIx(
       { address: address(SPL_TOKEN_PROGRAM_ID), role: AccountRole.READONLY },
     ],
     data: new Uint8Array([1]), // 1 = CreateIdempotent
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-027 vault claims — re-lock via direct CPI into ario-core
+// ---------------------------------------------------------------------------
+//
+// Still-locked vault claims re-lock into a native ario-core vault
+// (preserving the original unlock time) when the remaining lock is at
+// least ario-core's `min_vault_duration`; shorter remainders (and expired
+// vaults) deliver liquid. A still-locked claim must carry six trailing
+// optional accounts; the escrow program routes `payer == claimant`
+// through `create_vault` internally, so the account set is identical
+// either way. The SDK's `TokenEscrow` claim methods predate ADR-027
+// (they pre-flight the removed `VaultStillLocked` gate and omit the
+// re-lock accounts), so the app builds these two instructions itself.
+
+/** Solana `sysvar::instructions` id (Ed25519 attestation introspection). */
+const INSTRUCTIONS_SYSVAR_ID = 'Sysvar1nstructions1111111111111111111111111';
+
+const ARIO_CONFIG_SEED = 'ario_config';
+const VAULT_COUNTER_SEED = 'vault_counter';
+const VAULT_SEED = 'vault';
+
+/** Byte offset of `min_vault_duration: i64` inside `ArioConfig`:
+ *  disc(8) + authority(32) + mint(32) + arns_program(32) + treasury(32)
+ *  + total_supply(8) + protocol_balance(8) + circulating_supply(8)
+ *  + locked_supply(8) = 168. Fixed-offset read is safe here: the field
+ *  sits before every append-only extension point (ADR-020). */
+const ARIO_CONFIG_MIN_VAULT_DURATION_OFFSET = 168;
+
+/** Byte offset of `next_id: u64` inside `VaultCounter`: disc(8) + owner(32). */
+const VAULT_COUNTER_NEXT_ID_OFFSET = 40;
+
+/** The six trailing optional accounts a still-locked vault claim carries. */
+export interface VaultRelockAccounts {
+  payerTokenAccount: Address;
+  arioCoreConfig: Address;
+  recipientVaultCounter: Address;
+  vault: Address;
+  vaultTokenAccount: Address;
+  arioCoreProgram: Address;
+}
+
+/** ario-core `ArioConfig` PDA. */
+export async function getArioConfigPda(coreProgram: Address): Promise<Address> {
+  const [pda] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(ARIO_CONFIG_SEED)],
+  });
+  return pda;
+}
+
+/** Live `min_vault_duration` (seconds) from ario-core's config, or null when
+ *  the config account doesn't exist on this cluster. */
+export async function fetchMinVaultDuration(
+  rpc: SolanaRpc,
+  coreProgram: Address,
+): Promise<bigint | null> {
+  const configPda = await getArioConfigPda(coreProgram);
+  const { value } = await rpc
+    .getAccountInfo(configPda, { encoding: 'base64' })
+    .send();
+  if (!value) return null;
+  const data = Uint8Array.from(atob(value.data[0]), (c) => c.charCodeAt(0));
+  const view = new DataView(data.buffer, data.byteOffset);
+  return view.getBigInt64(ARIO_CONFIG_MIN_VAULT_DURATION_OFFSET, true);
+}
+
+/** The claimant's next vault id (0 when the counter doesn't exist yet). */
+export async function fetchNextVaultId(
+  rpc: SolanaRpc,
+  coreProgram: Address,
+  owner: Address,
+): Promise<bigint> {
+  const enc = getAddressEncoder();
+  const [counterPda] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(VAULT_COUNTER_SEED), enc.encode(owner)],
+  });
+  const { value } = await rpc
+    .getAccountInfo(counterPda, { encoding: 'base64' })
+    .send();
+  if (!value) return 0n;
+  const data = Uint8Array.from(atob(value.data[0]), (c) => c.charCodeAt(0));
+  const view = new DataView(data.buffer, data.byteOffset);
+  return view.getBigUint64(VAULT_COUNTER_NEXT_ID_OFFSET, true);
+}
+
+/** Derive the claimant's `VaultCounter` PDA and the `Vault` PDA for `vaultId`. */
+export async function deriveVaultPdas(
+  coreProgram: Address,
+  claimant: Address,
+  vaultId: bigint,
+): Promise<{ counter: Address; vault: Address }> {
+  const enc = getAddressEncoder();
+  const [counter] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(VAULT_COUNTER_SEED), enc.encode(claimant)],
+  });
+  const idBytes = new Uint8Array(8);
+  new DataView(idBytes.buffer).setBigUint64(0, vaultId, true);
+  const [vault] = await getProgramDerivedAddress({
+    programAddress: coreProgram,
+    seeds: [new TextEncoder().encode(VAULT_SEED), enc.encode(claimant), idBytes],
+  });
+  return { counter, vault };
+}
+
+interface ClaimVaultBaseAccounts {
+  escrow: Address;
+  escrowTokenAccount: Address;
+  claimantTokenAccount: Address;
+  claimant: Address;
+  depositor: Address;
+  payer: Address;
+}
+
+function claimVaultAccountMetas(
+  base: ClaimVaultBaseAccounts,
+  withInstructionsSysvar: boolean,
+  relock?: VaultRelockAccounts,
+) {
+  const metas = [
+    { address: base.escrow, role: AccountRole.WRITABLE },
+    { address: base.escrowTokenAccount, role: AccountRole.WRITABLE },
+    { address: base.claimantTokenAccount, role: AccountRole.WRITABLE },
+    { address: base.claimant, role: AccountRole.READONLY },
+    { address: base.depositor, role: AccountRole.WRITABLE },
+    { address: base.payer, role: AccountRole.WRITABLE_SIGNER },
+    ...(withInstructionsSysvar
+      ? [{ address: address(INSTRUCTIONS_SYSVAR_ID), role: AccountRole.READONLY }]
+      : []),
+    { address: address(SPL_TOKEN_PROGRAM_ID), role: AccountRole.READONLY },
+    { address: address(SYSTEM_PROGRAM_ID), role: AccountRole.READONLY },
+  ];
+  if (relock) {
+    metas.push(
+      { address: relock.payerTokenAccount, role: AccountRole.WRITABLE },
+      { address: relock.arioCoreConfig, role: AccountRole.WRITABLE },
+      { address: relock.recipientVaultCounter, role: AccountRole.WRITABLE },
+      { address: relock.vault, role: AccountRole.WRITABLE },
+      { address: relock.vaultTokenAccount, role: AccountRole.WRITABLE },
+      { address: relock.arioCoreProgram, role: AccountRole.READONLY },
+    );
+  }
+  return metas;
+}
+
+/** `claim_vault_ethereum` instruction (args: message_nonce, signature).
+ *  Pass `relock` whenever the vault is still locked. */
+export function buildClaimVaultEthereumIx(
+  programId: Address,
+  accounts: ClaimVaultBaseAccounts,
+  messageNonce: Uint8Array,
+  signature: Uint8Array,
+  relock?: VaultRelockAccounts,
+): Instruction {
+  if (messageNonce.length !== 32) throw new Error('nonce must be 32 bytes');
+  if (signature.length !== 65) throw new Error('signature must be 65 bytes');
+  const data = new Uint8Array(8 + 32 + 65);
+  data.set(CLAIM_VAULT_ETHEREUM_DISCRIMINATOR as Uint8Array, 0);
+  data.set(messageNonce, 8);
+  data.set(signature, 40);
+  return {
+    programAddress: programId,
+    accounts: claimVaultAccountMetas(accounts, false, relock),
+    data,
+  };
+}
+
+/** `claim_vault_arweave_attested` instruction (args: message_nonce). The
+ *  Ed25519 attestation sigverify ix MUST immediately precede this one.
+ *  Pass `relock` whenever the vault is still locked. */
+export function buildClaimVaultArweaveAttestedIx(
+  programId: Address,
+  accounts: ClaimVaultBaseAccounts,
+  messageNonce: Uint8Array,
+  relock?: VaultRelockAccounts,
+): Instruction {
+  if (messageNonce.length !== 32) throw new Error('nonce must be 32 bytes');
+  const data = new Uint8Array(8 + 32);
+  data.set(CLAIM_VAULT_ARWEAVE_ATTESTED_DISCRIMINATOR as Uint8Array, 0);
+  data.set(messageNonce, 8);
+  return {
+    programAddress: programId,
+    accounts: claimVaultAccountMetas(accounts, true, relock),
+    data,
   };
 }
 
@@ -279,6 +488,24 @@ export function formatRecipientPubkey(
   return b64.length > 24 ? `${b64.slice(0, 24)}...` : b64;
 }
 
+/** Canonical recipient identity for display: the checksummed-ish 0x address
+ *  for Ethereum, or the base64url Arweave address (sha256 of the RSA modulus)
+ *  for Arweave — the same value bound into the on-chain claim message. */
+export function formatRecipient(
+  protocol: EscrowProtocol,
+  pubkey: Uint8Array,
+): string {
+  if (protocol === 'ethereum') {
+    return (
+      '0x' +
+      Array.from(pubkey)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+    );
+  }
+  return _deriveRecipientId(pubkey);
+}
+
 /** Format mARIO (6 decimals) to a display ARIO string. */
 export function formatMarioToArio(mARIO: bigint): string {
   const whole = mARIO / 1_000_000n;
@@ -308,94 +535,64 @@ function bytesToBase64url(bytes: Uint8Array): string {
 // ---------------------------------------------------------------------------
 
 function deserializeEscrowAnt(data: Uint8Array): EscrowAntState {
-  let offset = 8; // skip Anchor discriminator
-  const version = data[offset++];
-  const bump = data[offset++];
-  const depositor = bs58.encode(data.slice(offset, offset + 32)) as Address;
-  offset += 32;
-  const antMint = bs58.encode(data.slice(offset, offset + 32)) as Address;
-  offset += 32;
+  const raw = getEscrowAntDecoder().decode(data);
+  if (
+    raw.recipientProtocol !== ESCROW_PROTOCOL_ARWEAVE &&
+    raw.recipientProtocol !== ESCROW_PROTOCOL_ETHEREUM
+  ) {
+    throw new Error(`EscrowAnt: unknown protocol byte ${raw.recipientProtocol}`);
+  }
   const recipientProtocol: EscrowProtocol =
-    data[offset++] === ESCROW_PROTOCOL_ARWEAVE ? 'arweave' : 'ethereum';
-  const recipientPubkeyLen = data[offset] | (data[offset + 1] << 8);
-  offset += 2;
-  const recipientPubkey = new Uint8Array(
-    data.slice(offset, offset + 512).subarray(0, recipientPubkeyLen),
-  );
-  offset += 512;
-  const nonce = new Uint8Array(data.slice(offset, offset + 32));
-  offset += 32;
-  const depositSlot = new DataView(
-    data.buffer,
-    data.byteOffset + offset,
-    8,
-  ).getBigUint64(0, true);
+    raw.recipientProtocol === ESCROW_PROTOCOL_ARWEAVE ? 'arweave' : 'ethereum';
+  const expectedLen =
+    recipientProtocol === 'arweave'
+      ? ESCROW_ARWEAVE_PUBKEY_LEN
+      : ESCROW_ETHEREUM_PUBKEY_LEN;
   return {
-    version,
-    bump,
-    depositor,
-    antMint,
+    version: raw.version,
+    bump: raw.bump,
+    depositor: raw.depositor,
+    antMint: raw.antMint,
     recipientProtocol,
-    recipientPubkey,
-    nonce,
-    depositSlot,
+    // Trim the zero-padded blob to its active length (512 / 20).
+    recipientPubkey: new Uint8Array(raw.recipientPubkey.subarray(0, expectedLen)),
+    nonce: new Uint8Array(raw.nonce),
+    depositSlot: raw.depositSlot,
   };
 }
 
 export function deserializeEscrowToken(data: Uint8Array): EscrowTokenState {
-  let offset = 8;
-  const version = data[offset++];
-  const bump = data[offset++];
-  const depositor = bs58.encode(data.slice(offset, offset + 32)) as Address;
-  offset += 32;
-  const assetType: EscrowAssetType = data[offset++] === 1 ? 'token' : 'vault';
-  const amount = new DataView(
-    data.buffer,
-    data.byteOffset + offset,
-    8,
-  ).getBigUint64(0, true);
-  offset += 8;
-  const arioMint = bs58.encode(data.slice(offset, offset + 32)) as Address;
-  offset += 32;
-  const assetId = new Uint8Array(data.slice(offset, offset + 32));
-  offset += 32;
+  const raw = getEscrowTokenDecoder().decode(data);
+  if (
+    raw.recipientProtocol !== ESCROW_PROTOCOL_ARWEAVE &&
+    raw.recipientProtocol !== ESCROW_PROTOCOL_ETHEREUM
+  ) {
+    throw new Error(
+      `EscrowToken: unknown protocol byte ${raw.recipientProtocol}`,
+    );
+  }
   const recipientProtocol: EscrowProtocol =
-    data[offset++] === ESCROW_PROTOCOL_ARWEAVE ? 'arweave' : 'ethereum';
-  const recipientPubkeyLen = data[offset] | (data[offset + 1] << 8);
-  offset += 2;
-  const recipientPubkey = new Uint8Array(
-    data.slice(offset, offset + 512).subarray(0, recipientPubkeyLen),
-  );
-  offset += 512;
-  const nonce = new Uint8Array(data.slice(offset, offset + 32));
-  offset += 32;
-  const depositSlot = new DataView(
-    data.buffer,
-    data.byteOffset + offset,
-    8,
-  ).getBigUint64(0, true);
-  offset += 8;
-  const vaultEndTimestamp = new DataView(
-    data.buffer,
-    data.byteOffset + offset,
-    8,
-  ).getBigInt64(0, true);
-  offset += 8;
-  const vaultRevocable = data[offset++] !== 0;
+    raw.recipientProtocol === ESCROW_PROTOCOL_ARWEAVE ? 'arweave' : 'ethereum';
+  const expectedLen =
+    recipientProtocol === 'arweave'
+      ? ESCROW_ARWEAVE_PUBKEY_LEN
+      : ESCROW_ETHEREUM_PUBKEY_LEN;
+  const assetType: EscrowAssetType =
+    raw.assetType === ESCROW_ASSET_TYPE_VAULT ? 'vault' : 'token';
   return {
-    version,
-    bump,
-    depositor,
+    version: raw.version,
+    bump: raw.bump,
+    depositor: raw.depositor,
     assetType,
-    amount,
-    arioMint,
-    assetId,
+    amount: raw.amount,
+    arioMint: raw.arioMint,
+    assetId: new Uint8Array(raw.assetId),
     recipientProtocol,
-    recipientPubkey,
-    nonce,
-    depositSlot,
-    vaultEndTimestamp,
-    vaultRevocable,
+    recipientPubkey: new Uint8Array(raw.recipientPubkey.subarray(0, expectedLen)),
+    nonce: new Uint8Array(raw.nonce),
+    depositSlot: raw.depositSlot,
+    vaultEndTimestamp: raw.vaultEndTimestamp,
+    vaultRevocable: raw.vaultRevocable,
   };
 }
 
@@ -480,21 +677,41 @@ async function scanProgram(
   }
 }
 
-/** All ANT escrows deposited by a wallet (memcmp on depositor at offset 10). */
+// Account-type discriminator (first 8 bytes) as a base58 memcmp filter at
+// offset 0. Filtering by discriminator — rather than by a downstream field
+// offset — is immune to schema-layout shifts (the v1→v3 version expansion is
+// exactly what broke the old depositor@10 / recipient@77 filters). The
+// matching recipient/depositor field is then compared client-side on the
+// decoded state, which the generated codec keeps correct across versions.
+const ANT_DISCRIMINATOR_B58 = bs58.encode(
+  new Uint8Array(ESCROW_ANT_DISCRIMINATOR),
+);
+const TOKEN_DISCRIMINATOR_B58 = bs58.encode(
+  new Uint8Array(ESCROW_TOKEN_DISCRIMINATOR),
+);
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** All ANT escrows deposited by a wallet. */
 export async function fetchEscrowsByDepositor(
   rpc: SolanaRpc,
   depositorPubkey: string,
   programId: string,
 ): Promise<Array<{ antMint: string; state: EscrowAntState }>> {
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 10, bytes: depositorPubkey },
+    { offset: 0, bytes: ANT_DISCRIMINATOR_B58 },
   ]);
   const results: Array<{ antMint: string; state: EscrowAntState }> = [];
   for (const { data } of accounts) {
-    if (data.length === ESCROW_TOKEN_ACCOUNT_SIZE) continue;
     try {
       const state = deserializeEscrowAnt(data);
-      results.push({ antMint: state.antMint, state });
+      if (state.depositor === depositorPubkey) {
+        results.push({ antMint: state.antMint, state });
+      }
     } catch {
       /* skip malformed */
     }
@@ -508,24 +725,71 @@ export async function fetchAllEscrowsByDepositor(
   depositorPubkey: string,
   programId: string,
 ): Promise<EscrowResult[]> {
-  const accounts = await scanProgram(rpc, programId, [
-    { offset: 10, bytes: depositorPubkey },
+  const [ants, tokens] = await Promise.all([
+    scanProgram(rpc, programId, [{ offset: 0, bytes: ANT_DISCRIMINATOR_B58 }]),
+    scanProgram(rpc, programId, [{ offset: 0, bytes: TOKEN_DISCRIMINATOR_B58 }]),
   ]);
   const results: EscrowResult[] = [];
-  for (const { data } of accounts) {
+  for (const { data } of ants) {
     try {
-      if (data.length === ESCROW_TOKEN_ACCOUNT_SIZE) {
-        const state = deserializeEscrowToken(data);
-        results.push({ type: 'token', assetId: bytesToHexLowerLocal(state.assetId), state });
-      } else {
-        const state = deserializeEscrowAnt(data);
+      const state = deserializeEscrowAnt(data);
+      if (state.depositor === depositorPubkey) {
         results.push({ type: 'ant', antMint: state.antMint, state });
       }
     } catch {
       /* skip malformed */
     }
   }
+  for (const { data } of tokens) {
+    try {
+      const state = deserializeEscrowToken(data);
+      if (state.depositor === depositorPubkey) {
+        results.push({
+          type: 'token',
+          assetId: bytesToHexLowerLocal(state.assetId),
+          state,
+        });
+      }
+    } catch {
+      /* skip malformed */
+    }
+  }
   return results;
+}
+
+/** Every escrow on the program, split by kind. Used by the Explore page +
+ *  home-page stats — a full `getProgramAccounts` scan per discriminator. */
+export interface AllEscrows {
+  ants: Array<{ antMint: string; state: EscrowAntState }>;
+  tokens: TokenEscrowByRecipient[];
+}
+
+export async function fetchAllEscrows(
+  rpc: SolanaRpc,
+  programId: string,
+): Promise<AllEscrows> {
+  const [antAccts, tokenAccts] = await Promise.all([
+    scanProgram(rpc, programId, [{ offset: 0, bytes: ANT_DISCRIMINATOR_B58 }]),
+    scanProgram(rpc, programId, [{ offset: 0, bytes: TOKEN_DISCRIMINATOR_B58 }]),
+  ]);
+  const ants: AllEscrows['ants'] = [];
+  for (const { data } of antAccts) {
+    try {
+      const state = deserializeEscrowAnt(data);
+      ants.push({ antMint: state.antMint, state });
+    } catch {
+      /* skip malformed */
+    }
+  }
+  const tokens: TokenEscrowByRecipient[] = [];
+  for (const { pubkey, data } of tokenAccts) {
+    try {
+      tokens.push({ escrowPda: pubkey, state: deserializeEscrowToken(data) });
+    } catch {
+      /* skip malformed */
+    }
+  }
+  return { ants, tokens };
 }
 
 /** All ANT escrows addressed to a recipient identity. */
@@ -535,22 +799,19 @@ export async function fetchEscrowsByRecipient(
   recipientBytes: Uint8Array,
   programId: string,
 ): Promise<Array<{ antMint: string; state: EscrowAntState }>> {
-  const protocolByte =
-    recipientProtocol === 'arweave'
-      ? ESCROW_PROTOCOL_ARWEAVE
-      : ESCROW_PROTOCOL_ETHEREUM;
-  const matchLen = recipientProtocol === 'ethereum' ? 20 : 32;
-  const matchBytes = recipientBytes.slice(0, matchLen);
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 74, bytes: bs58.encode(new Uint8Array([protocolByte])) },
-    { offset: 77, bytes: bs58.encode(matchBytes) },
+    { offset: 0, bytes: ANT_DISCRIMINATOR_B58 },
   ]);
   const results: Array<{ antMint: string; state: EscrowAntState }> = [];
   for (const { data } of accounts) {
-    if (data.length === ESCROW_TOKEN_ACCOUNT_SIZE) continue;
     try {
       const state = deserializeEscrowAnt(data);
-      results.push({ antMint: state.antMint, state });
+      if (
+        state.recipientProtocol === recipientProtocol &&
+        bytesEqual(state.recipientPubkey, recipientBytes)
+      ) {
+        results.push({ antMint: state.antMint, state });
+      }
     } catch {
       /* skip malformed */
     }
@@ -568,8 +829,8 @@ export interface TokenEscrowByRecipient {
 
 /**
  * All token/vault escrows addressed to a recipient identity. Mirrors
- * `fetchEscrowsByRecipient` but for the 711-byte EscrowToken layout:
- * protocol byte at offset 115, recipient pubkey at offset 118.
+ * `fetchEscrowsByRecipient`, scanning by the EscrowToken discriminator and
+ * matching the recipient on the decoded state.
  */
 export async function fetchTokenEscrowsByRecipient(
   rpc: SolanaRpc,
@@ -577,21 +838,19 @@ export async function fetchTokenEscrowsByRecipient(
   recipientBytes: Uint8Array,
   programId: string,
 ): Promise<TokenEscrowByRecipient[]> {
-  const protocolByte =
-    recipientProtocol === 'arweave'
-      ? ESCROW_PROTOCOL_ARWEAVE
-      : ESCROW_PROTOCOL_ETHEREUM;
-  const matchLen = recipientProtocol === 'ethereum' ? 20 : 32;
-  const matchBytes = recipientBytes.slice(0, matchLen);
   const accounts = await scanProgram(rpc, programId, [
-    { offset: 115, bytes: bs58.encode(new Uint8Array([protocolByte])) },
-    { offset: 118, bytes: bs58.encode(matchBytes) },
+    { offset: 0, bytes: TOKEN_DISCRIMINATOR_B58 },
   ]);
   const results: TokenEscrowByRecipient[] = [];
   for (const { pubkey, data } of accounts) {
-    if (data.length !== ESCROW_TOKEN_ACCOUNT_SIZE) continue;
     try {
-      results.push({ escrowPda: pubkey, state: deserializeEscrowToken(data) });
+      const state = deserializeEscrowToken(data);
+      if (
+        state.recipientProtocol === recipientProtocol &&
+        bytesEqual(state.recipientPubkey, recipientBytes)
+      ) {
+        results.push({ escrowPda: pubkey, state });
+      }
     } catch {
       /* skip malformed */
     }
@@ -681,6 +940,9 @@ export async function sendInstructions(
     (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
     (m) => appendTransactionMessageInstructions(instructions, m),
   );
+  // The signer (wallet-signer.ts) preserves kit's `lifetimeConstraint` on the
+  // returned tx, so the blockhash-confirmation strategy below can read
+  // `lastValidBlockHeight`.
   const signed = await signTransactionMessageWithSigners(message);
   const sendAndConfirm = sendAndConfirmTransactionFactory({
     rpc,

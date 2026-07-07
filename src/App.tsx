@@ -6,12 +6,11 @@ import {
 import { WalletModalProvider as _WalletModalProvider } from '@solana/wallet-adapter-react-ui';
 
 import { LandingPage } from './pages/LandingPage.tsx';
-import { DepositPage } from './pages/DepositPage.tsx';
-import { DepositTokensPage } from './pages/DepositTokensPage.tsx';
-import { DepositVaultPage } from './pages/DepositVaultPage.tsx';
 import { ClaimPage } from './pages/ClaimPage.tsx';
 import { ManagePage } from './pages/ManagePage.tsx';
 import { LookupPage } from './pages/LookupPage.tsx';
+import { ExplorePage } from './pages/ExplorePage.tsx';
+import { EscrowsProvider } from './context/EscrowsContext.tsx';
 import { AttestorHealthBanner } from './components/AttestorHealthBanner.tsx';
 import { ProgramConfigBanner } from './components/ProgramConfigBanner.tsx';
 import {
@@ -88,20 +87,40 @@ function useHashRoute(): { route: string; query: URLSearchParams } {
   };
 }
 
-function Router({ route, query, depositsOn }: { route: string; query: URLSearchParams; depositsOn: boolean }) {
+/** Reactive CSS media query — true when the query matches. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = () => setMatches(mql.matches);
+    onChange();
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, [query]);
+  return matches;
+}
+
+function Router({ route, query }: { route: string; query: URLSearchParams }) {
   switch (route) {
+    // Deposit flows now live as tabs inside the Manage hub. These routes
+    // deep-link into the matching tab; ManagePage falls back to the Manage
+    // tab when deposits are disabled.
     case 'deposit':
-      return depositsOn ? <DepositPage /> : <LandingPage />;
+      return <ManagePage antMint="" initialTab="deposit-ant" />;
     case 'deposit-tokens':
-      return depositsOn ? <DepositTokensPage /> : <LandingPage />;
+      return <ManagePage antMint="" initialTab="deposit-tokens" />;
     case 'deposit-vault':
-      return depositsOn ? <DepositVaultPage /> : <LandingPage />;
+      return <ManagePage antMint="" initialTab="deposit-vault" />;
     case 'claim':
       return <ClaimPage antMint={query.get('ant') ?? ''} />;
     case 'manage':
       return <ManagePage antMint={query.get('ant') ?? ''} />;
     case 'lookup':
       return <LookupPage initialAntMint={query.get('ant') ?? ''} />;
+    case 'explore':
+      return <ExplorePage />;
     case 'home':
     case '':
     default:
@@ -141,6 +160,23 @@ export function App() {
   const [arioMint, setArioMintState] = useState(() => getArioMintOverride());
   const depositsOn = areDepositsEnabled();
   const [menuOpen, setMenuOpen] = useState(false);
+
+  // Above 480px the primary links live inline in the header; below, they
+  // collapse into the hamburger menu (which always holds Settings + deposits).
+  const isDesktop = useMediaQuery('(min-width: 480px)');
+  const depositNav = depositsOn
+    ? ([
+        ['#/deposit', 'deposit', 'Deposit ANT'],
+        ['#/deposit-tokens', 'deposit-tokens', 'Deposit Tokens'],
+        ['#/deposit-vault', 'deposit-vault', 'Deposit Vault'],
+      ] as const)
+    : ([] as const);
+  const mainNav = [
+    ['#/explore', 'explore', 'Explore'],
+    ['#/claim', 'claim', 'Claim'],
+    ['#/manage', 'manage', 'Manage'],
+    ['#/lookup', 'lookup', 'Lookup'],
+  ] as const;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -186,6 +222,7 @@ export function App() {
     <ConnectionProvider endpoint={endpoint}>
       <WalletProvider wallets={wallets}>
         <WalletModalProvider>
+          <EscrowsProvider>
           <div style={styles.container}>
             <ProgramConfigBanner />
             <AttestorHealthBanner />
@@ -194,6 +231,20 @@ export function App() {
                 <ArioLogo />
                 <span style={styles.badge}>Escrow</span>
               </a>
+              <div style={styles.headerRight}>
+              {isDesktop && (
+                <nav style={styles.headerNav}>
+                  {mainNav.map(([href, target, label]) => (
+                    <a
+                      key={target}
+                      href={href}
+                      className={`header-nav-link ${route === target ? 'header-nav-link--active' : ''}`}
+                    >
+                      {label}
+                    </a>
+                  ))}
+                </nav>
+              )}
               <div style={styles.menuWrapper}>
                 <button
                   className="menu-button"
@@ -210,28 +261,33 @@ export function App() {
                       onClick={() => setMenuOpen(false)}
                     />
                     <div className="menu-panel" style={styles.menuPanel}>
-                      <nav style={styles.menuNav}>
-                        {([
-                          ...(depositsOn ? [
-                            ['#/deposit', 'deposit', 'Deposit ANT'],
-                            ['#/deposit-tokens', 'deposit-tokens', 'Deposit Tokens'],
-                            ['#/deposit-vault', 'deposit-vault', 'Deposit Vault'],
-                          ] as const : []),
-                          ['#/claim', 'claim', 'Claim'],
-                          ['#/manage', 'manage', 'Manage'],
-                          ['#/lookup', 'lookup', 'Lookup'],
-                        ] as const).map(([href, target, label]) => (
-                          <a
-                            key={target}
-                            href={href}
-                            className={`menu-nav-link ${route === target ? 'menu-nav-link--active' : ''}`}
-                            onClick={() => setMenuOpen(false)}
-                          >
-                            {label}
-                          </a>
-                        ))}
-                      </nav>
-                      <div style={styles.menuDivider} />
+                      {(() => {
+                        // Deposits always live in the menu; the primary links
+                        // only appear here below the desktop breakpoint (they're
+                        // inline in the header above it).
+                        const items = [
+                          ...depositNav,
+                          ...(isDesktop ? [] : mainNav),
+                        ];
+                        if (items.length === 0) return null;
+                        return (
+                          <>
+                            <nav style={styles.menuNav}>
+                              {items.map(([href, target, label]) => (
+                                <a
+                                  key={target}
+                                  href={href}
+                                  className={`menu-nav-link ${route === target ? 'menu-nav-link--active' : ''}`}
+                                  onClick={() => setMenuOpen(false)}
+                                >
+                                  {label}
+                                </a>
+                              ))}
+                            </nav>
+                            <div style={styles.menuDivider} />
+                          </>
+                        );
+                      })()}
                       <div style={styles.menuSection}>
                         <span style={styles.menuSectionLabel}>Settings</span>
                         <label style={styles.menuLabel}>RPC Endpoint</label>
@@ -327,9 +383,10 @@ export function App() {
                   </>
                 )}
               </div>
+              </div>
             </header>
             <main className="app-main" style={styles.main}>
-              <Router route={route} query={query} depositsOn={depositsOn} />
+              <Router route={route} query={query} />
             </main>
             <footer style={styles.footer}>
               <a
@@ -346,6 +403,7 @@ export function App() {
               </span>
             </footer>
           </div>
+          </EscrowsProvider>
         </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
@@ -401,6 +459,16 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     justifyContent: 'center',
     padding: '32px 24px',
+  },
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  headerNav: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '2px',
   },
   /* ── Menu ── */
   menuWrapper: {

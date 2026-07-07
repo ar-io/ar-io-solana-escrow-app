@@ -27,8 +27,10 @@ interface Props {
  * Reads the EscrowAnt PDA via `fetchEscrowState()`.
  */
 type EscrowLookupResult =
-  | { kind: 'ant'; state: EscrowAntState }
-  | { kind: 'token'; state: EscrowTokenState };
+  // `id` is the identifier a recipient claims with: the ANT mint for ANT
+  // escrows, or the escrow PDA for token/vault escrows.
+  | { kind: 'ant'; state: EscrowAntState; id: string }
+  | { kind: 'token'; state: EscrowTokenState; id: string };
 
 export function LookupPage({ initialAntMint }: Props) {
   const [antMint, setAntMint] = useState(initialAntMint);
@@ -66,7 +68,7 @@ export function LookupPage({ initialAntMint }: Props) {
       );
       const antState = await fetchEscrowState(rpc, String(antPda), programId);
       if (antState) {
-        setLookupResult({ kind: 'ant', state: antState });
+        setLookupResult({ kind: 'ant', state: antState, id: antState.antMint });
         return;
       }
 
@@ -76,14 +78,15 @@ export function LookupPage({ initialAntMint }: Props) {
       if (rawAccount) {
         if (rawAccount.size === ESCROW_TOKEN_ACCOUNT_SIZE) {
           const tokenState = deserializeEscrowToken(rawAccount.data);
-          setLookupResult({ kind: 'token', state: tokenState });
+          // token/vault escrows are claimed by their PDA — the pasted address.
+          setLookupResult({ kind: 'token', state: tokenState, id: antMint });
           return;
         }
         if (rawAccount.size === ESCROW_ANT_ACCOUNT_SIZE) {
           // Unlikely path — a direct PDA lookup that is an ANT escrow
           const antPdaState = await fetchEscrowState(rpc, antMint, programId);
           if (antPdaState) {
-            setLookupResult({ kind: 'ant', state: antPdaState });
+            setLookupResult({ kind: 'ant', state: antPdaState, id: antPdaState.antMint });
             return;
           }
         }
@@ -110,6 +113,7 @@ export function LookupPage({ initialAntMint }: Props) {
   // Derive display values based on result kind
   const escrowState = lookupResult?.kind === 'ant' ? lookupResult.state : null;
   const tokenState = lookupResult?.kind === 'token' ? lookupResult.state : null;
+  const claimId = lookupResult?.id ?? '';
 
   const nonceHex = (() => {
     const nonce = escrowState?.nonce ?? tokenState?.nonce;
@@ -184,18 +188,15 @@ export function LookupPage({ initialAntMint }: Props) {
               label="Deposit Slot"
               value={escrowState.depositSlot.toString()}
             />
-            <Field
-              label="Version"
-              value={String(escrowState.version)}
-            />
           </div>
 
           <div style={styles.actions}>
             <a
-              href={`#/claim?ant=${escrowState.antMint}`}
-              style={styles.actionLink}
+              href={`#/claim?ant=${claimId}`}
+              className="btn-primary"
+              style={styles.claimButton}
             >
-              Claim this ANT
+              Claim this ANT →
             </a>
             <a
               href={`#/manage?ant=${escrowState.antMint}`}
@@ -269,10 +270,16 @@ export function LookupPage({ initialAntMint }: Props) {
                 />
               </>
             )}
-            <Field
-              label="Version"
-              value={String(tokenState.version)}
-            />
+          </div>
+
+          <div style={styles.actions}>
+            <a
+              href={`#/claim?ant=${claimId}`}
+              className="btn-primary"
+              style={styles.claimButton}
+            >
+              Claim {tokenState.assetType === 'vault' ? 'this vault' : 'these tokens'} →
+            </a>
           </div>
         </div>
       )}
@@ -420,9 +427,21 @@ const styles: Record<string, React.CSSProperties> = {
   actions: {
     display: 'flex',
     gap: '16px',
+    alignItems: 'center',
     marginTop: '16px',
     paddingTop: '12px',
     borderTop: `1px solid ${brand.border}`,
+  },
+  claimButton: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    padding: '10px 20px',
+    borderRadius: '16px',
+    background: brand.primary,
+    color: brand.white,
+    fontSize: '14px',
+    fontWeight: 700,
+    textDecoration: 'none',
+    whiteSpace: 'nowrap' as const,
   },
   actionLink: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
