@@ -32,6 +32,7 @@ import {
   waitForClaim,
   type ClaimProtocol,
 } from '../services/claims-api.ts';
+import { assertServerCanonicalMatches } from '../services/canonical-verify.ts';
 
 interface Props {
   /** ANT mint or escrow PDA, optionally read from `?ant=<mint>` query string. */
@@ -311,6 +312,24 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       });
       const messageBytes = initiated.canonicalMessageBytes;
 
+      // MEDIUM-2: never sign server bytes we haven't independently verified.
+      // Rebuild the canonical from the asset the UI is showing + THIS wallet's
+      // modulus + the destination the user typed, and byte-compare. A tampered
+      // claimant/asset/amount from a malicious server is rejected before signing.
+      assertServerCanonicalMatches(messageBytes, {
+        network: initiated.network,
+        claimant,
+        nonce: hexToBytes(initiated.nonceHex),
+        recipientPubkey: modulusBytes,
+        asset: escrowState
+          ? { assetType: 'ant', antMint: String(escrowState.antMint) }
+          : {
+              assetType: tokenState!.assetType,
+              assetId: tokenState!.assetId,
+              amount: tokenState!.amount,
+            },
+      });
+
       // signMessage return shape varies by wallet:
       // - Wander/ArConnect: Uint8Array (512 bytes)
       // - Some wallets: ArrayBuffer
@@ -361,6 +380,30 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       });
       const messageBytes = initiated.canonicalMessageBytes;
 
+      // MEDIUM-2: verify the server's canonical against local state BEFORE signing.
+      // The recipient identity is the connected Ethereum address (20 bytes); a
+      // server that swapped the claimant/asset/amount fails the byte-compare.
+      if (!ethereumAddress) {
+        throw new Error('Ethereum wallet address unavailable; reconnect and try again.');
+      }
+      const ethRecipientBytes = hexToBytes(ethereumAddress.trim());
+      if (ethRecipientBytes.length !== 20) {
+        throw new Error('Connected Ethereum address is not 20 bytes.');
+      }
+      assertServerCanonicalMatches(messageBytes, {
+        network: initiated.network,
+        claimant,
+        nonce: hexToBytes(initiated.nonceHex),
+        recipientPubkey: ethRecipientBytes,
+        asset: escrowState
+          ? { assetType: 'ant', antMint: String(escrowState.antMint) }
+          : {
+              assetType: tokenState!.assetType,
+              assetId: tokenState!.assetId,
+              amount: tokenState!.amount,
+            },
+      });
+
       // Use ethers to sign the message via the injected provider.
       // personal_sign applies EIP-191 prefix automatically.
       const { BrowserProvider } = await import('ethers');
@@ -380,7 +423,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     } finally {
       setSigning(false);
     }
-  }, [escrowState, tokenState, claimant, antMint, ethereumProvider]);
+  }, [escrowState, tokenState, claimant, antMint, ethereumProvider, ethereumAddress]);
 
   // -------------------------------------------------------------------
   // Submit claim transaction
