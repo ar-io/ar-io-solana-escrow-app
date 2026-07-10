@@ -2,9 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { brand } from '../brand.js';
 import { getNetwork } from '../services/solana.ts';
 import {
-  AttestorClient,
-  type AttestorHealth,
-} from '../services/attestor-client.ts';
+  getClaimsApiUrl,
+  getClaimsHealth,
+  type ClaimsHealth,
+} from '../services/claims-api.ts';
 
 type Status = 'checking' | 'ok' | 'mismatch' | 'unreachable' | 'no-config';
 
@@ -16,18 +17,14 @@ interface State {
 }
 
 /**
- * Top-of-page strip that surfaces attestor configuration problems
- * before the user reaches the claim flow. Three cases worth
- * surfacing globally (the claim flow itself does the same checks
- * just-in-time, but failing late after the user has signed wastes
- * everyone's time):
+ * Top-of-page strip that surfaces claims-service configuration problems
+ * before the user reaches the claim flow (repurposed from the on-chain
+ * attestor-health banner). Three cases worth surfacing globally:
  *
- * - VITE_ATTESTOR_URL is unset and the page is loaded against a
- *   public cluster (Arweave claims will fail at submit).
- * - Attestor `/health` reports a different `network` than the
- *   currently selected RPC (would silently fail on-chain Ed25519
- *   introspection — explicit mismatch error is much friendlier).
- * - Attestor is unreachable / returns 5xx.
+ * - VITE_CLAIMS_API_URL is unset (every lookup/claim will fail).
+ * - The claims service `/health` reports a different `network` than the
+ *   page expects (claims would be built against the wrong deployment).
+ * - The claims service is unreachable / returns 5xx.
  *
  * Renders nothing in the success path. Single-shot per page load.
  */
@@ -37,53 +34,50 @@ export function AttestorHealthBanner() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const url = import.meta.env.VITE_ATTESTOR_URL as string | undefined;
+      const url = getClaimsApiUrl();
       const expectedNetwork = getNetwork();
 
       if (!url) {
-        // Localnet doesn't strictly need an attestor (devs may be
-        // running the on-chain RSA path under solana-program-test);
-        // only flag the missing config on real clusters.
-        if (
-          expectedNetwork === 'solana-mainnet' ||
-          expectedNetwork === 'solana-devnet'
-        ) {
-          if (!cancelled) {
-            setState({
-              status: 'no-config',
-              detail:
-                'Arweave claims require an attestor service. Set VITE_ATTESTOR_URL in the environment and reload.',
-              expected: expectedNetwork,
-            });
-          }
+        if (!cancelled) {
+          setState({
+            status: 'no-config',
+            detail:
+              'The claims service is not configured. Set VITE_CLAIMS_API_URL in the environment and reload.',
+            expected: expectedNetwork,
+          });
         }
         return;
       }
 
       try {
-        const client = new AttestorClient({ url });
-        const health: AttestorHealth = await client.health();
+        const health: ClaimsHealth = await getClaimsHealth();
         if (cancelled) return;
         if (!health.ok) {
           setState({
             status: 'unreachable',
-            detail: 'Attestor reported a non-OK status.',
+            detail: 'The claims service reported a non-OK status.',
             expected: expectedNetwork,
             actual: health.network,
           });
           return;
         }
-        if (health.network !== expectedNetwork) {
+        // Only flag a genuine cross-cluster mismatch; a localnet claims
+        // service (network "localnet") against a devnet page is fine for dev.
+        if (
+          health.network &&
+          (health.network === 'solana-mainnet' ||
+            health.network === 'solana-devnet') &&
+          health.network !== expectedNetwork
+        ) {
           setState({
             status: 'mismatch',
             detail:
-              'The attestor and the page disagree on which Solana network they are bound to. The on-chain Ed25519 verification would fail silently. Use a matching RPC or a matching attestor before issuing a claim.',
+              'The claims service and the page disagree on which Solana network they are bound to. Use a matching claims deployment before issuing a claim.',
             expected: expectedNetwork,
             actual: health.network,
           });
           return;
         }
-        // Healthy and matching — show nothing.
         setState({
           status: 'ok',
           detail: '',
@@ -123,16 +117,16 @@ export function AttestorHealthBanner() {
     >
       <strong style={styles.label}>
         {state.status === 'mismatch'
-          ? 'Attestor / RPC network mismatch'
+          ? 'Claims service / network mismatch'
           : state.status === 'unreachable'
-            ? 'Attestor unreachable'
-            : 'Attestor not configured'}
+            ? 'Claims service unreachable'
+            : 'Claims service not configured'}
       </strong>
       <span style={styles.detail}>{state.detail}</span>
       {(state.actual || state.expected) && (
         <span style={styles.tag}>
           page: {state.expected}
-          {state.actual ? ` · attestor: ${state.actual}` : ''}
+          {state.actual ? ` · claims: ${state.actual}` : ''}
         </span>
       )}
     </div>

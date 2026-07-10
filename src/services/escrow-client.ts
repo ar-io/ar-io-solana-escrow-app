@@ -41,16 +41,29 @@ import {
 import type { SolanaRpc, SolanaRpcSubscriptions } from './solana.ts';
 
 // --- SDK re-exports (single import site for pages) -------------------------
+// NOTE: `getEscrowAntPDA` is re-defined locally below (the centralized claims
+// API keys ANTs by mint, not by an on-chain PDA), so it is intentionally NOT
+// re-exported from the SDK here.
 export {
   ANTEscrow,
   TokenEscrow,
   canonicalMessage,
   canonicalMessageV2,
   bytesToHexLower,
-  getEscrowAntPDA,
   getEscrowTokenPDA,
   getEscrowVaultPDA,
 } from '@ar.io/sdk/solana';
+
+// --- centralized claims API (F2 service-layer swap) ------------------------
+// The discovery/fetch functions below now resolve against the ar-io-claims
+// service instead of Solana RPC. Same signatures, same return shapes — the
+// pages are unchanged. See `./claims-api.ts` and CENTRALIZED_CLAIM_PIVOT_PLAN.md §5.
+import {
+  getClaimable as apiGetClaimable,
+  deriveRecipientId as apiDeriveRecipientId,
+  type ClaimableAssetView,
+  type ClaimableResult,
+} from './claims-api.ts';
 export type {
   EscrowProtocol,
   EscrowAntState,
@@ -419,29 +432,238 @@ function decodeAccountData(data: unknown): Uint8Array {
   return new Uint8Array();
 }
 
-/** Fetch a single escrow account's raw bytes by PDA, owner-checked. */
+/**
+ * Fetch a single escrow account by identifier, as raw `state.rs`-layout
+ * bytes so the existing deserializers keep working. Backed by the claims
+ * API (`GET /v1/assets/:key`, enriched from any prior `/v1/claimable`
+ * discovery) — `rpc`/`programId` are accepted for signature compatibility
+ * and ignored.
+ */
 export async function fetchRawEscrowAccount(
-  rpc: SolanaRpc,
-  pdaAddress: string,
-  programId: string,
+  _rpc: SolanaRpc,
+  key: string,
+  _programId: string,
 ): Promise<{ data: Uint8Array; size: number } | null> {
-  const { value } = await rpc
-    .getAccountInfo(address(pdaAddress), { encoding: 'base64' })
-    .send();
-  if (!value || value.owner !== programId) return null;
-  const data = decodeAccountData(value.data);
+  const resolved = await resolveAsset(key);
+  if (!resolved) return null;
+  const data =
+    resolved.kind === 'ant'
+      ? serializeEscrowAntState(resolved.antState)
+      : serializeEscrowTokenState(resolved.tokenState);
   return { data, size: data.length };
 }
 
-/** Fetch the ANT escrow state for a mint, or null. */
+/** Fetch the ANT escrow state for an ANT mint, or null. Claims-API backed. */
 export async function fetchEscrowState(
-  rpc: SolanaRpc,
-  pdaAddress: string,
-  programId: string,
+  _rpc: SolanaRpc,
+  key: string,
+  _programId: string,
 ): Promise<EscrowAntState | null> {
-  const raw = await fetchRawEscrowAccount(rpc, pdaAddress, programId);
-  if (!raw || raw.size === ESCROW_TOKEN_ACCOUNT_SIZE) return null;
-  return deserializeEscrowAnt(raw.data);
+  const resolved = await resolveAsset(key);
+  return resolved && resolved.kind === 'ant' ? resolved.antState : null;
+}
+
+// ---------------------------------------------------------------------------
+// Claims-API asset resolution + synthesis
+//
+// The pages consume `EscrowAntState` / `EscrowTokenState` (and raw
+// `state.rs` bytes). The centralized API returns higher-level asset views
+// with no recipient bytes or protocol on the single-asset endpoint, so we
+// enrich from discovery (`/v1/claimable`, which DOES carry protocol +
+// recipient bytes) and cache the result. A directly-pasted identifier with
+// no prior discovery resolves best-effort (protocol defaults to arweave;
+// recipient bytes empty) — the primary UX connects a wallet first, which
+// populates the cache with the correct protocol.
+// ---------------------------------------------------------------------------
+
+/** Mainnet ARIO SPL mint — display-only placeholder for synthesized token
+ *  state (the centralized claim path no longer touches SPL token accounts). */
+const MAINNET_ARIO_MINT = 'ARiotkVQiLCdng5y3Grf8XLfXJiAR4Dqfsrfcbq5Zo3';
+/** Display-only placeholder depositor (assets are held by the AR.IO
+ *  authority in the centralized model; the API does not expose a depositor). */
+const PLACEHOLDER_DEPOSITOR = '11111111111111111111111111111111';
+
+type ResolvedAsset =
+  | { kind: 'ant'; antState: EscrowAntState }
+  | { kind: 'token'; tokenState: EscrowTokenState };
+
+const assetCache = new Map<string, ResolvedAsset>();
+
+function hexToBytesLocal(hex: string): Uint8Array {
+  let h = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (h.length % 2 !== 0) h = '0' + h;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/** If `key` is a base58 string decoding to 32 bytes, return its 64-hex form
+ *  (the token/vault assetKey shape the API uses); else undefined. */
+function base58KeyToHex(key: string): string | undefined {
+  try {
+    const bytes = bs58.decode(key);
+    if (bytes.length !== 32) return undefined;
+    return bytesToHexLowerLocal(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
+function synthAntState(
+  view: ClaimableAssetView,
+  protocol: EscrowProtocol,
+  recipientBytes: Uint8Array,
+): EscrowAntState {
+  return {
+    version: 1,
+    bump: 255,
+    depositor: address(PLACEHOLDER_DEPOSITOR),
+    antMint: address(view.antMint ?? view.assetKey),
+    recipientProtocol: protocol,
+    recipientPubkey: recipientBytes,
+    nonce: hexToBytesLocal(view.nonceHex),
+    depositSlot: 0n,
+  };
+}
+
+function synthTokenState(
+  view: ClaimableAssetView,
+  protocol: EscrowProtocol,
+  recipientBytes: Uint8Array,
+): EscrowTokenState {
+  return {
+    version: 1,
+    bump: 255,
+    depositor: address(PLACEHOLDER_DEPOSITOR),
+    assetType: view.assetType === 'vault' ? 'vault' : 'token',
+    amount: view.amount ? BigInt(view.amount) : 0n,
+    arioMint: address(MAINNET_ARIO_MINT),
+    assetId: hexToBytesLocal(view.assetKey),
+    recipientProtocol: protocol,
+    recipientPubkey: recipientBytes,
+    nonce: hexToBytesLocal(view.nonceHex),
+    depositSlot: 0n,
+    vaultEndTimestamp: view.vaultEndTimestamp ? BigInt(view.vaultEndTimestamp) : 0n,
+    vaultRevocable: false,
+  };
+}
+
+/** Build + cache a `ResolvedAsset` from an API view, under every alias the
+ *  pages might carry (ANT: mint base58; token/vault: 64-hex AND base58(id)). */
+function cacheResolved(
+  view: ClaimableAssetView,
+  protocol: EscrowProtocol,
+  recipientBytes: Uint8Array,
+): ResolvedAsset {
+  if (view.assetType === 'ant') {
+    const antState = synthAntState(view, protocol, recipientBytes);
+    const entry: ResolvedAsset = { kind: 'ant', antState };
+    assetCache.set(String(antState.antMint), entry);
+    assetCache.set(view.assetKey, entry);
+    return entry;
+  }
+  const tokenState = synthTokenState(view, protocol, recipientBytes);
+  const entry: ResolvedAsset = { kind: 'token', tokenState };
+  assetCache.set(view.assetKey, entry); // 64-hex
+  assetCache.set(bs58.encode(tokenState.assetId), entry); // base58(assetId)
+  return entry;
+}
+
+/**
+ * Resolve a page identifier to escrow state from the discovery cache only.
+ *
+ * A cache hit means the asset was discovered via `GET /v1/claimable` (which
+ * carries the true protocol + recipient bytes). On a miss — a deep-linked or
+ * pasted identifier we have not discovered — we return `null` rather than
+ * fabricating a protocol from `GET /v1/assets` (that endpoint omits protocol,
+ * and guessing "arweave" would strand an Ethereum recipient on the wrong
+ * signer). `null` routes the claim UI to connect a wallet, which resolves the
+ * asset with its real protocol via `/v1/claimable`. (Pivot plan §5.)
+ */
+async function resolveAsset(key: string): Promise<ResolvedAsset | null> {
+  const cached = assetCache.get(key);
+  if (cached) return cached;
+  const hexKey = base58KeyToHex(key);
+  if (hexKey) {
+    const viaHex = assetCache.get(hexKey);
+    if (viaHex) return viaHex;
+  }
+  return null;
+}
+
+/** In-flight de-dupe for the two claimable calls the claim page fires in
+ *  parallel (ANT + token/vault) for one connected wallet. */
+const claimableInflight = new Map<string, Promise<ClaimableResult>>();
+
+async function claimableForRecipient(
+  recipientBytes: Uint8Array,
+): Promise<ClaimableResult> {
+  const recipientId = await apiDeriveRecipientId(recipientBytes);
+  let inflight = claimableInflight.get(recipientId);
+  if (!inflight) {
+    inflight = apiGetClaimable({ recipientId }).finally(() => {
+      // Clear shortly after so a later refresh re-fetches.
+      setTimeout(() => claimableInflight.delete(recipientId), 3_000);
+    });
+    claimableInflight.set(recipientId, inflight);
+  }
+  return inflight;
+}
+
+/**
+ * Identity-agnostic derivation of the "PDA" address for an ANT mint. In the
+ * centralized model ANTs are keyed by mint, not by an on-chain PDA, so this
+ * is the identity (kept for `LookupPage` signature compatibility).
+ */
+export async function getEscrowAntPDA(
+  antMint: Address,
+  _programId: Address,
+): Promise<[Address, number]> {
+  return [antMint, 255];
+}
+
+// ---------------------------------------------------------------------------
+// state.rs re-serialization (inverse of the deserializers above) — lets the
+// synthesized API state flow through the pages' existing raw-bytes decoders.
+// ---------------------------------------------------------------------------
+
+function serializeEscrowAntState(s: EscrowAntState): Uint8Array {
+  const data = new Uint8Array(ESCROW_ANT_ACCOUNT_SIZE);
+  const view = new DataView(data.buffer);
+  let o = 8; // discriminator (zeroed)
+  data[o++] = s.version & 0xff;
+  data[o++] = s.bump & 0xff;
+  data.set(bs58.decode(String(s.depositor)), o); o += 32;
+  data.set(bs58.decode(String(s.antMint)), o); o += 32;
+  data[o++] = s.recipientProtocol === 'arweave' ? ESCROW_PROTOCOL_ARWEAVE : ESCROW_PROTOCOL_ETHEREUM;
+  view.setUint16(o, s.recipientPubkey.length, true); o += 2;
+  data.set(s.recipientPubkey.slice(0, 512), o); o += 512;
+  data.set(s.nonce.slice(0, 32), o); o += 32;
+  view.setBigUint64(o, s.depositSlot, true);
+  return data;
+}
+
+function serializeEscrowTokenState(s: EscrowTokenState): Uint8Array {
+  const data = new Uint8Array(ESCROW_TOKEN_ACCOUNT_SIZE);
+  const view = new DataView(data.buffer);
+  let o = 8; // discriminator (zeroed)
+  data[o++] = s.version & 0xff;
+  data[o++] = s.bump & 0xff;
+  data.set(bs58.decode(String(s.depositor)), o); o += 32;
+  data[o++] = s.assetType === 'token' ? 1 : 0;
+  view.setBigUint64(o, s.amount, true); o += 8;
+  data.set(bs58.decode(String(s.arioMint)), o); o += 32;
+  data.set(s.assetId.slice(0, 32), o); o += 32;
+  data[o++] = s.recipientProtocol === 'arweave' ? ESCROW_PROTOCOL_ARWEAVE : ESCROW_PROTOCOL_ETHEREUM;
+  view.setUint16(o, s.recipientPubkey.length, true); o += 2;
+  data.set(s.recipientPubkey.slice(0, 512), o); o += 512;
+  data.set(s.nonce.slice(0, 32), o); o += 32;
+  view.setBigUint64(o, s.depositSlot, true); o += 8;
+  view.setBigInt64(o, s.vaultEndTimestamp, true); o += 8;
+  data[o++] = s.vaultRevocable ? 1 : 0;
+  return data;
 }
 
 async function scanProgram(
@@ -528,31 +750,21 @@ export async function fetchAllEscrowsByDepositor(
   return results;
 }
 
-/** All ANT escrows addressed to a recipient identity. */
+/** All ANT escrows addressed to a recipient identity (claims-API backed:
+ *  `GET /v1/claimable` by recipientId = b64url(sha256(recipientBytes))). */
 export async function fetchEscrowsByRecipient(
-  rpc: SolanaRpc,
+  _rpc: SolanaRpc,
   recipientProtocol: 'arweave' | 'ethereum',
   recipientBytes: Uint8Array,
-  programId: string,
+  _programId: string,
 ): Promise<Array<{ antMint: string; state: EscrowAntState }>> {
-  const protocolByte =
-    recipientProtocol === 'arweave'
-      ? ESCROW_PROTOCOL_ARWEAVE
-      : ESCROW_PROTOCOL_ETHEREUM;
-  const matchLen = recipientProtocol === 'ethereum' ? 20 : 32;
-  const matchBytes = recipientBytes.slice(0, matchLen);
-  const accounts = await scanProgram(rpc, programId, [
-    { offset: 74, bytes: bs58.encode(new Uint8Array([protocolByte])) },
-    { offset: 77, bytes: bs58.encode(matchBytes) },
-  ]);
+  const result = await claimableForRecipient(recipientBytes);
   const results: Array<{ antMint: string; state: EscrowAntState }> = [];
-  for (const { data } of accounts) {
-    if (data.length === ESCROW_TOKEN_ACCOUNT_SIZE) continue;
-    try {
-      const state = deserializeEscrowAnt(data);
-      results.push({ antMint: state.antMint, state });
-    } catch {
-      /* skip malformed */
+  for (const view of result.assets) {
+    if (view.assetType !== 'ant') continue;
+    const entry = cacheResolved(view, recipientProtocol, recipientBytes);
+    if (entry.kind === 'ant') {
+      results.push({ antMint: String(entry.antState.antMint), state: entry.antState });
     }
   }
   return results;
@@ -572,28 +784,24 @@ export interface TokenEscrowByRecipient {
  * protocol byte at offset 115, recipient pubkey at offset 118.
  */
 export async function fetchTokenEscrowsByRecipient(
-  rpc: SolanaRpc,
+  _rpc: SolanaRpc,
   recipientProtocol: 'arweave' | 'ethereum',
   recipientBytes: Uint8Array,
-  programId: string,
+  _programId: string,
 ): Promise<TokenEscrowByRecipient[]> {
-  const protocolByte =
-    recipientProtocol === 'arweave'
-      ? ESCROW_PROTOCOL_ARWEAVE
-      : ESCROW_PROTOCOL_ETHEREUM;
-  const matchLen = recipientProtocol === 'ethereum' ? 20 : 32;
-  const matchBytes = recipientBytes.slice(0, matchLen);
-  const accounts = await scanProgram(rpc, programId, [
-    { offset: 115, bytes: bs58.encode(new Uint8Array([protocolByte])) },
-    { offset: 118, bytes: bs58.encode(matchBytes) },
-  ]);
+  const result = await claimableForRecipient(recipientBytes);
   const results: TokenEscrowByRecipient[] = [];
-  for (const { pubkey, data } of accounts) {
-    if (data.length !== ESCROW_TOKEN_ACCOUNT_SIZE) continue;
-    try {
-      results.push({ escrowPda: pubkey, state: deserializeEscrowToken(data) });
-    } catch {
-      /* skip malformed */
+  for (const view of result.assets) {
+    if (view.assetType === 'ant') continue;
+    const entry = cacheResolved(view, recipientProtocol, recipientBytes);
+    if (entry.kind === 'token') {
+      // The claim identifier the page carries for token/vault is base58(assetId)
+      // (a valid Solana Address the pages can wrap in `address()`); the service
+      // maps it back to the 64-hex API assetKey.
+      results.push({
+        escrowPda: bs58.encode(entry.tokenState.assetId),
+        state: entry.tokenState,
+      });
     }
   }
   return results;

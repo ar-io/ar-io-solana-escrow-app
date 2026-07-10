@@ -46,18 +46,29 @@ export function getWsUrl(rpcUrl: string = getRpcUrl()): string {
 }
 
 /**
- * The escrow program id the app talks to. Required: the SDK ships no
- * working escrow program id for any public cluster (`ario-ant-escrow` is
- * not deployed on devnet/mainnet), so the user must point the app at
- * their own deployment via the footer switcher or `VITE_ESCROW_PROGRAM_ID`.
- * Returns `undefined` when unset (escrow actions are then disabled).
+ * Deployed (now dormant) `ario-ant-escrow` program id. After the F2 pivot
+ * the app talks to the centralized claims API, not this program, so it is
+ * only a valid-base58 sentinel that satisfies the pages' "program
+ * configured" guards (and hides the ProgramConfigBanner). Overridable via
+ * `VITE_ESCROW_PROGRAM_ID` / localStorage for the vestigial deposit/manage
+ * flows, which remain gated off.
+ */
+const DORMANT_ESCROW_PROGRAM_ID = '5HZhe9UqKL5zAsdz81nuuaxV41h8bFhudzxxBigAQndM';
+
+/**
+ * The escrow "backend configured" sentinel. In the centralized model the
+ * real backend is the claims API (`VITE_CLAIMS_API_URL`); this always
+ * returns a valid program id so the claim/lookup pages' guards pass. An
+ * explicit `VITE_ESCROW_PROGRAM_ID` / localStorage value still overrides.
  */
 export function getEscrowProgramId(): string | undefined {
   const saved =
     typeof localStorage !== 'undefined'
       ? localStorage.getItem(PROGRAM_KEY)
       : null;
-  return saved || import.meta.env.VITE_ESCROW_PROGRAM_ID || undefined;
+  return (
+    saved || import.meta.env.VITE_ESCROW_PROGRAM_ID || DORMANT_ESCROW_PROGRAM_ID
+  );
 }
 
 export function setEscrowProgramId(id: string): void {
