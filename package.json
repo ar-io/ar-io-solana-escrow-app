@@ -30,6 +30,10 @@
         "react": "^18.2.0",
         "react-dom": "^18.2.0"
     },
+    "//resolutions": "Collapse @solana/kit to one major. Trezor/@coinbase/cdp-sdk/x402 (transitive via @solana/wallet-adapter-wallets) pinned kit 2.x/5.x, giving 3 coexisting copies. This app registers wallets={[]} (Wallet Standard auto-detect only), so those connectors are never instantiated; forcing the 6.x line the app already uses dedupes them. Verified: yarn build + yarn test green.",
+    "resolutions": {
+        "@solana/kit": "^6.8.0"
+    },
     "devDependencies": {
         "@types/react": "^18.2.0",
         "@types/react-dom": "^18.2.0",

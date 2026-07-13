@@ -139,4 +139,30 @@ describe('rebuildClaimCanonical byte-parity with @ar.io/attestor-canonical', () 
     );
     expect(text).not.toContain('type:');
   });
+
+  it('reproduces the server vault canonical byte-for-byte (type: vault)', () => {
+    // A vault canonical is identical to the token one except the `type:` line.
+    // A server/client mismatch here would DoS every vault claimant, so pin it.
+    const text = new TextDecoder().decode(
+      rebuildClaimCanonical({
+        network: NETWORK,
+        claimant: VICTIM,
+        nonce: NONCE,
+        recipientPubkey: ETH_ID,
+        asset: { assetType: 'vault', assetId: new Uint8Array(32).fill(0x11), amount: 123_456_789n },
+      }),
+    );
+    expect(text).toBe(
+      [
+        'ar.io escrow claim',
+        'network: solana-mainnet',
+        `recipient: ${GOLDEN_RECIPIENT}`,
+        'type: vault',
+        `asset: ${'11'.repeat(32)}`,
+        'amount: 123456789',
+        `claimant: ${GOLDEN_CLAIMANT}`,
+        `nonce: ${'22'.repeat(32)}`,
+      ].join('\n'),
+    );
+  });
 });

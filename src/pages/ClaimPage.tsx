@@ -21,6 +21,7 @@ import {
 } from '../services/escrow-client.ts';
 import {
   getEscrowProgramId,
+  getNetwork,
   makeRpc,
 } from '../services/solana.ts';
 import {
@@ -312,12 +313,16 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       });
       const messageBytes = initiated.canonicalMessageBytes;
 
-      // MEDIUM-2: never sign server bytes we haven't independently verified.
-      // Rebuild the canonical from the asset the UI is showing + THIS wallet's
-      // modulus + the destination the user typed, and byte-compare. A tampered
-      // claimant/asset/amount from a malicious server is rejected before signing.
+      // MEDIUM-2: byte-compare the server canonical against a locally rebuilt one
+      // before signing. This is NOT independent asset/amount verification — the
+      // asset/amount shown come from the server's published signed ledger, not an
+      // on-chain read here, so those fields still rest on server trust + that
+      // ledger. What the byte-compare DOES guarantee is redirect protection: the
+      // canonical is byte-bound to the CLIENT's own network + this wallet's modulus
+      // + the destination the user typed, so a malicious server cannot silently
+      // rebind the claim to a claimant/recipient the user does not control or see.
       assertServerCanonicalMatches(messageBytes, {
-        network: initiated.network,
+        network: getNetwork(),
         claimant,
         nonce: hexToBytes(initiated.nonceHex),
         recipientPubkey: modulusBytes,
@@ -380,9 +385,14 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
       });
       const messageBytes = initiated.canonicalMessageBytes;
 
-      // MEDIUM-2: verify the server's canonical against local state BEFORE signing.
-      // The recipient identity is the connected Ethereum address (20 bytes); a
-      // server that swapped the claimant/asset/amount fails the byte-compare.
+      // MEDIUM-2: byte-compare the server canonical against a locally rebuilt one
+      // before signing. This does NOT independently verify asset/amount — those
+      // come from the server's published signed ledger, not an on-chain read here,
+      // so they still rest on server trust + that ledger. The real guarantee is
+      // redirect protection: the canonical is byte-bound to the CLIENT's own network
+      // + the connected Ethereum address (20 bytes) + the destination the user
+      // typed, so a malicious server cannot silently rebind the claim to a
+      // claimant/recipient the user does not control or see.
       if (!ethereumAddress) {
         throw new Error('Ethereum wallet address unavailable; reconnect and try again.');
       }
@@ -391,7 +401,7 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         throw new Error('Connected Ethereum address is not 20 bytes.');
       }
       assertServerCanonicalMatches(messageBytes, {
-        network: initiated.network,
+        network: getNetwork(),
         claimant,
         nonce: hexToBytes(initiated.nonceHex),
         recipientPubkey: ethRecipientBytes,
