@@ -6,81 +6,90 @@ import React, {
   useRef,
 } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { address } from '@solana/kit';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
 import { ArweaveWalletConnect } from '../components/ArweaveWalletConnect.tsx';
 import { EthereumWalletConnect } from '../components/EthereumWalletConnect.tsx';
+import { getNetwork, type EscrowNetwork } from '../services/solana.ts';
 import {
-  fetchEscrowsByRecipient,
-  fetchTokenEscrowsByRecipient,
-  fetchRawEscrowAccount,
-  deserializeEscrowToken,
-  lookupArweaveModulus,
-  parseArweaveRecipient,
-  isArweaveAddress,
-  ESCROW_TOKEN_ACCOUNT_SIZE,
-  type EscrowNetwork,
-} from '../services/escrow-client.ts';
-import { getAntEscrow, getEscrowProgramId, getNetwork, makeRpc } from '../services/solana.ts';
+  getClaimable,
+  getAsset,
+  type ClaimableAssetView,
+  type ClaimProtocol,
+} from '../services/claims-api.ts';
 import {
-  claimEscrowItem,
-  makeAttestor,
-  itemProtocol,
-  itemLabel,
-  type ClaimItem,
+  claimAsset,
   type ClaimPhase,
-} from '../services/claim-flow.ts';
+  type RecipientIdentity,
+} from '../services/claim-service.ts';
+import {
+  lookupArweaveModulus,
+  parseArweaveModulus,
+  parseEthereumAddress,
+  formatMarioToArio,
+  isArweaveAddress,
+} from '../services/recipient.ts';
 
 interface Props {
-  /** ANT mint or escrow PDA, optionally read from `?ant=<mint>` query string. */
+  /** Optional `?asset=<assetKey>` deep-link identifier (ANT mint or 64-hex id). */
   antMint: string;
 }
 
-type ItemResultPhase = 'queued' | ClaimPhase | 'success' | 'error';
+type ItemResultPhase = 'queued' | ClaimPhase | 'success' | 'review' | 'error';
 interface ItemResult {
   phase: ItemResultPhase;
   message?: string;
   tx?: string;
 }
 
+/** Human label for a claimable asset. */
+function assetLabel(a: ClaimableAssetView): string {
+  if (a.assetType === 'ant') return `ANT ${a.antMint ?? a.assetKey}`;
+  const amount = a.amount ? formatMarioToArio(BigInt(a.amount)) : '?';
+  return a.assetType === 'vault' ? `${amount} ARIO vault` : `${amount} ARIO`;
+}
+function assetKindLabel(a: ClaimableAssetView): string {
+  return a.assetType === 'ant' ? 'ANT' : a.assetType === 'vault' ? 'Vault' : 'Tokens';
+}
+
 /**
- * Recipient claim flow (batch).
+ * Recipient claim flow (batch) — centralized.
  *
- * 1. Connect the Arweave/Ethereum wallet the assets were escrowed to — we
- *    discover every escrow addressed to it (or accept a manual identifier).
+ * 1. Connect the Arweave/Ethereum wallet the assets were addressed to — we ask
+ *    the claims service for everything claimable by that identity.
  * 2. Choose a Solana destination wallet (shared by all claims).
- * 3. Select which assets to claim and run them: each is signed with the
- *    recipient wallet and submitted as its own Solana tx, with per-item
- *    progress. One signature per asset is unavoidable — each escrow's
- *    authorization message is bound to its own asset id and nonce.
+ * 3. Claim: each asset is initiated, its server-issued canonical is verified
+ *    locally, signed with the recipient wallet, and submitted. One signature per
+ *    asset — each canonical binds its own asset id + single-use challenge nonce.
  */
-export function ClaimPage({ antMint: initialAntMint }: Props) {
-  const [antMint, setAntMint] = useState(initialAntMint);
-  // Manual identifier entry starts expanded only when a claim link
-  // pre-filled an identifier, so any lookup error is visible.
-  const [showManual, setShowManual] = useState(!!initialAntMint);
-  const [claimant, setClaimant] = useState('');
-  const [solPubkey, setSolPubkey] = useState<string | undefined>();
+export function ClaimPage({ antMint: initialAssetKey }: Props) {
+  const [assetKeyInput, setAssetKeyInput] = useState(initialAssetKey);
+  const [showManual, setShowManual] = useState(!!initialAssetKey);
 
-  // Manual single-escrow resolution (feeds an item into the list).
-  const [manualItem, setManualItem] = useState<ClaimItem | null>(null);
-  const [escrowLoading, setEscrowLoading] = useState(false);
-  const [escrowError, setEscrowError] = useState('');
-
-  // Recipient wallet connection (for signing).
+  // Recipient wallet connection (for discovery + signing).
   const [arweaveAddress, setArweaveAddress] = useState<string | undefined>();
   const [ethereumAddress, setEthereumAddress] = useState<string | undefined>();
   const [ethereumProvider, setEthereumProvider] = useState<any>(undefined);
 
-  // Recipient discovery.
-  const [recipientItems, setRecipientItems] = useState<ClaimItem[]>([]);
+  // The connected wallet's raw identity bytes (recipient pubkey), established
+  // ONLY from the connected wallet — never guessed from a deep link.
+  const [identity, setIdentity] = useState<RecipientIdentity | null>(null);
+
+  // Destination.
+  const [claimant, setClaimant] = useState('');
+  const [solPubkey, setSolPubkey] = useState<string | undefined>();
+
+  // Discovery.
+  const [assets, setAssets] = useState<ClaimableAssetView[]>([]);
+  const [manualAsset, setManualAsset] = useState<ClaimableAssetView | null>(null);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [discoveryError, setDiscoveryError] = useState('');
   const [discoveryDone, setDiscoveryDone] = useState(false);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState('');
 
-  // Selection + per-item claim results.
+  // Selection + per-item results.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<Record<string, ItemResult>>({});
   const [running, setRunning] = useState(false);
@@ -88,86 +97,22 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const { publicKey, wallet } = useWallet();
   const network: EscrowNetwork = getNetwork();
 
-  // Auto-fill the destination with the connected Solana wallet's address,
-  // unless the user has typed their own. Re-syncs if they switch wallets.
+  const connectedProtocol: ClaimProtocol | undefined = arweaveAddress
+    ? 'arweave'
+    : ethereumAddress
+      ? 'ethereum'
+      : undefined;
+
+  // Auto-fill the destination with the connected Solana wallet, unless the user
+  // typed their own. Re-syncs if they switch wallets.
   const claimantEditedRef = useRef(false);
   useEffect(() => {
     if (!publicKey || claimantEditedRef.current) return;
     setClaimant(publicKey.toBase58());
   }, [publicKey]);
 
-  const connectedProtocol: 'arweave' | 'ethereum' | undefined = arweaveAddress
-    ? 'arweave'
-    : ethereumAddress
-      ? 'ethereum'
-      : undefined;
-
   // -------------------------------------------------------------------
-  // Manual identifier resolution
-  // -------------------------------------------------------------------
-  const fetchEscrow = useCallback(async () => {
-    const id = antMint.trim();
-    if (!id || id.length < 30) {
-      setManualItem(null);
-      setEscrowError('');
-      return;
-    }
-    if (isArweaveAddress(id)) {
-      setManualItem(null);
-      setEscrowError(
-        'That looks like an Arweave address. Connect your Arweave wallet above to find the assets escrowed for you — this field is for a Solana ANT mint or escrow account address.',
-      );
-      return;
-    }
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(id)) {
-      setManualItem(null);
-      setEscrowError(
-        'That is not a valid Solana ANT mint or escrow address. Connect your wallet above to discover escrows automatically.',
-      );
-      return;
-    }
-
-    setEscrowLoading(true);
-    setEscrowError('');
-    setManualItem(null);
-    try {
-      const programId = getEscrowProgramId();
-      if (!programId) {
-        setEscrowError(
-          'No escrow program configured. Set the program ID in the menu (or VITE_ESCROW_PROGRAM_ID) to point at a deployed ario-ant-escrow program.',
-        );
-        return;
-      }
-      const { rpc } = makeRpc();
-
-      // Try as an ANT mint first (the SDK derives the PDA + decodes).
-      const state = await getAntEscrow({}).get(address(id));
-      if (state) {
-        setManualItem({ kind: 'ant', id, state });
-        return;
-      }
-      // Otherwise treat the identifier as a token/vault escrow PDA.
-      const rawAccount = await fetchRawEscrowAccount(rpc, id, programId);
-      if (rawAccount && rawAccount.size === ESCROW_TOKEN_ACCOUNT_SIZE) {
-        setManualItem({ kind: 'token', id, state: deserializeEscrowToken(rawAccount.data) });
-        return;
-      }
-      setEscrowError('No active escrow found for this identifier.');
-    } catch (e) {
-      setEscrowError(
-        `Failed to fetch escrow: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setEscrowLoading(false);
-    }
-  }, [antMint]);
-
-  useEffect(() => {
-    if (antMint && antMint.trim().length >= 32) fetchEscrow();
-  }, [antMint, fetchEscrow]);
-
-  // -------------------------------------------------------------------
-  // Auto-discover escrows addressed to the connected recipient wallet
+  // Establish identity + discover claimable assets on wallet connect
   // -------------------------------------------------------------------
   useEffect(() => {
     if (!arweaveAddress) return;
@@ -175,26 +120,22 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     (async () => {
       setDiscoveryLoading(true);
       setDiscoveryError('');
+      setIdentity(null);
       try {
-        const programId = getEscrowProgramId();
-        if (!programId) throw new Error('No escrow program configured.');
-        const { rpc } = makeRpc();
-        const modulus = parseArweaveRecipient(await lookupArweaveModulus(arweaveAddress));
-        const [ants, tokens] = await Promise.all([
-          fetchEscrowsByRecipient(rpc, 'arweave', modulus, programId),
-          fetchTokenEscrowsByRecipient(rpc, 'arweave', modulus, programId),
-        ]);
+        // The 512-byte RSA modulus is required to rebuild + verify the canonical
+        // before signing, so we look it up (and it self-verifies to the address).
+        const modulus = parseArweaveModulus(await lookupArweaveModulus(arweaveAddress));
+        if (cancelled) return;
+        setIdentity({ protocol: 'arweave', pubkey: modulus });
+        const res = await getClaimable({ protocol: 'arweave', address: arweaveAddress });
         if (!cancelled) {
-          setRecipientItems([
-            ...ants.map((e): ClaimItem => ({ kind: 'ant', id: e.antMint, state: e.state })),
-            ...tokens.map((t): ClaimItem => ({ kind: 'token', id: t.escrowPda, state: t.state })),
-          ]);
+          setAssets(res.assets);
           setDiscoveryDone(true);
         }
       } catch (e) {
         if (!cancelled) {
           setDiscoveryError(
-            `Could not look up escrows: ${e instanceof Error ? e.message : String(e)}. You can still enter an identifier manually.`,
+            `Could not load your claimable assets: ${e instanceof Error ? e.message : String(e)}`,
           );
           setDiscoveryDone(true);
         }
@@ -202,7 +143,9 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         if (!cancelled) setDiscoveryLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [arweaveAddress]);
 
   useEffect(() => {
@@ -211,29 +154,18 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     (async () => {
       setDiscoveryLoading(true);
       setDiscoveryError('');
+      setIdentity(null);
       try {
-        let hex = ethereumAddress.trim();
-        if (hex.startsWith('0x') || hex.startsWith('0X')) hex = hex.slice(2);
-        const addrBytes = new Uint8Array(20);
-        for (let i = 0; i < 20; i++) addrBytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-        const programId = getEscrowProgramId();
-        if (!programId) throw new Error('No escrow program configured.');
-        const { rpc } = makeRpc();
-        const [ants, tokens] = await Promise.all([
-          fetchEscrowsByRecipient(rpc, 'ethereum', addrBytes, programId),
-          fetchTokenEscrowsByRecipient(rpc, 'ethereum', addrBytes, programId),
-        ]);
+        setIdentity({ protocol: 'ethereum', pubkey: parseEthereumAddress(ethereumAddress) });
+        const res = await getClaimable({ protocol: 'ethereum', address: ethereumAddress });
         if (!cancelled) {
-          setRecipientItems([
-            ...ants.map((e): ClaimItem => ({ kind: 'ant', id: e.antMint, state: e.state })),
-            ...tokens.map((t): ClaimItem => ({ kind: 'token', id: t.escrowPda, state: t.state })),
-          ]);
+          setAssets(res.assets);
           setDiscoveryDone(true);
         }
       } catch (e) {
         if (!cancelled) {
           setDiscoveryError(
-            `Could not look up escrows: ${e instanceof Error ? e.message : String(e)}. You can still enter an identifier manually.`,
+            `Could not load your claimable assets: ${e instanceof Error ? e.message : String(e)}`,
           );
           setDiscoveryDone(true);
         }
@@ -241,44 +173,82 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         if (!cancelled) setDiscoveryLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [ethereumAddress]);
 
-  // Reset discovery when both recipient wallets disconnect.
+  // Reset when both recipient wallets disconnect.
   useEffect(() => {
     if (!arweaveAddress && !ethereumAddress) {
-      setRecipientItems([]);
+      setAssets([]);
+      setManualAsset(null);
+      setIdentity(null);
       setDiscoveryDone(false);
       setDiscoveryError('');
     }
   }, [arweaveAddress, ethereumAddress]);
 
   // -------------------------------------------------------------------
-  // Unified item list (discovery + manual), deduped by identifier
+  // Manual deep-link resolution (protocol comes from the connected wallet)
   // -------------------------------------------------------------------
-  const items = useMemo<ClaimItem[]>(() => {
-    const map = new Map<string, ClaimItem>();
-    for (const it of recipientItems) map.set(it.id, it);
-    if (manualItem) map.set(manualItem.id, manualItem);
-    return [...map.values()];
-  }, [recipientItems, manualItem]);
+  const fetchManualAsset = useCallback(async () => {
+    const key = assetKeyInput.trim();
+    setManualError('');
+    setManualAsset(null);
+    if (!key || key.length < 30) return;
+    if (isArweaveAddress(key)) {
+      setManualError(
+        'That looks like an Arweave address. Connect your Arweave wallet above — we find everything addressed to it automatically.',
+      );
+      return;
+    }
+    if (!connectedProtocol) {
+      setManualError('Connect the wallet the asset was addressed to first, then paste the claim identifier.');
+      return;
+    }
+    setManualLoading(true);
+    try {
+      const asset = await getAsset(key);
+      if (asset) setManualAsset(asset);
+      else setManualError('No claimable asset found for this identifier.');
+    } catch (e) {
+      setManualError(`Lookup failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setManualLoading(false);
+    }
+  }, [assetKeyInput, connectedProtocol]);
 
-  // Default-select each item the first time it appears, but only if its
-  // protocol matches the connected wallet (so it's actually claimable).
-  // Respects later user deselection.
+  useEffect(() => {
+    if (assetKeyInput && assetKeyInput.trim().length >= 32 && connectedProtocol) {
+      fetchManualAsset();
+    }
+  }, [assetKeyInput, connectedProtocol, fetchManualAsset]);
+
+  // -------------------------------------------------------------------
+  // Unified item list (discovery + manual), deduped by assetKey
+  // -------------------------------------------------------------------
+  const items = useMemo<ClaimableAssetView[]>(() => {
+    const map = new Map<string, ClaimableAssetView>();
+    for (const a of assets) map.set(a.assetKey, a);
+    if (manualAsset) map.set(manualAsset.assetKey, manualAsset);
+    return [...map.values()];
+  }, [assets, manualAsset]);
+
+  // Default-select each item the first time it appears.
   const seenIds = useRef<Set<string>>(new Set());
   useEffect(() => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      for (const it of items) {
-        if (!seenIds.current.has(it.id)) {
-          seenIds.current.add(it.id);
-          if (itemProtocol(it) === connectedProtocol) next.add(it.id);
+      for (const a of items) {
+        if (!seenIds.current.has(a.assetKey)) {
+          seenIds.current.add(a.assetKey);
+          next.add(a.assetKey);
         }
       }
       return next;
     });
-  }, [items, connectedProtocol]);
+  }, [items]);
 
   const toggleSelected = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -289,28 +259,23 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
     });
   }, []);
 
-  const claimableItems = useMemo(
-    () => items.filter((it) => itemProtocol(it) === connectedProtocol),
-    [items, connectedProtocol],
+  const selected = useMemo(
+    () => items.filter((a) => selectedIds.has(a.assetKey)),
+    [items, selectedIds],
   );
-  const selectedClaimable = useMemo(
-    () => claimableItems.filter((it) => selectedIds.has(it.id)),
-    [claimableItems, selectedIds],
-  );
-  const allClaimableSelected =
-    claimableItems.length > 0 && selectedClaimable.length === claimableItems.length;
+  const allSelected = items.length > 0 && selected.length === items.length;
 
   const toggleSelectAll = useCallback(() => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (claimableItems.every((it) => next.has(it.id))) {
-        for (const it of claimableItems) next.delete(it.id);
+      if (items.every((a) => next.has(a.assetKey))) {
+        for (const a of items) next.delete(a.assetKey);
       } else {
-        for (const it of claimableItems) next.add(it.id);
+        for (const a of items) next.add(a.assetKey);
       }
       return next;
     });
-  }, [claimableItems]);
+  }, [items]);
 
   // -------------------------------------------------------------------
   // Run the batch claim
@@ -318,79 +283,93 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
   const isValidClaimant = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(claimant.trim());
 
   const runBatch = useCallback(async () => {
-    if (!publicKey || !isValidClaimant || selectedClaimable.length === 0) return;
+    if (!identity || !isValidClaimant || selected.length === 0) return;
     setRunning(true);
-
-    const attestor = makeAttestor(network);
     const claimantTrim = claimant.trim();
 
-    // Seed every selected item as queued.
     setResults((prev) => {
       const next = { ...prev };
-      for (const it of selectedClaimable) next[it.id] = { phase: 'queued' };
+      for (const a of selected) next[a.assetKey] = { phase: 'queued' };
       return next;
     });
 
-    for (const item of selectedClaimable) {
+    for (const asset of selected) {
       try {
-        const tx = await claimEscrowItem(item, {
+        const status = await claimAsset({
+          asset,
           claimant: claimantTrim,
+          identity,
           network,
-          walletAdapter: wallet?.adapter,
           ethereumProvider,
-          attestor,
           onPhase: (phase, message) =>
-            setResults((prev) => ({ ...prev, [item.id]: { phase, message } })),
+            setResults((prev) => ({ ...prev, [asset.assetKey]: { phase, message } })),
         });
-        setResults((prev) => ({ ...prev, [item.id]: { phase: 'success', tx } }));
+        const tx = status.txSignatures[0];
+        if (status.status === 'confirmed' || status.status === 'verified' || status.status === 'dispatching') {
+          setResults((prev) => ({
+            ...prev,
+            [asset.assetKey]: {
+              phase: 'success',
+              tx,
+              message: status.status === 'confirmed' ? undefined : 'Settling…',
+            },
+          }));
+        } else if (status.status === 'pending_review') {
+          setResults((prev) => ({
+            ...prev,
+            [asset.assetKey]: { phase: 'review', message: 'Submitted for review.' },
+          }));
+        } else {
+          setResults((prev) => ({
+            ...prev,
+            [asset.assetKey]: {
+              phase: 'error',
+              message: status.error ?? `Claim ${status.status}.`,
+            },
+          }));
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const friendly =
           msg.includes('User rejected') || msg.includes('user rejected')
             ? 'Cancelled in wallet.'
             : msg;
-        setResults((prev) => ({ ...prev, [item.id]: { phase: 'error', message: friendly } }));
+        setResults((prev) => ({ ...prev, [asset.assetKey]: { phase: 'error', message: friendly } }));
       }
     }
 
     setRunning(false);
-  }, [
-    publicKey,
-    isValidClaimant,
-    selectedClaimable,
-    connectedProtocol,
-    network,
-    wallet,
-    ethereumProvider,
-    claimant,
-  ]);
+  }, [identity, isValidClaimant, selected, claimant, network, ethereumProvider]);
 
   // -------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------
   const hasWallet = !!connectedProtocol;
-  const successCount = Object.values(results).filter((r) => r.phase === 'success').length;
+  const successCount = Object.values(results).filter(
+    (r) => r.phase === 'success' || r.phase === 'review',
+  ).length;
   const allClaimed =
-    selectedClaimable.length > 0 &&
-    selectedClaimable.every((it) => results[it.id]?.phase === 'success');
-  const canClaim =
-    !!publicKey && isValidClaimant && selectedClaimable.length > 0 && !running;
+    selected.length > 0 &&
+    selected.every(
+      (a) => results[a.assetKey]?.phase === 'success' || results[a.assetKey]?.phase === 'review',
+    );
+  const canClaim = !!identity && isValidClaimant && selected.length > 0 && !running;
 
   return (
     <div style={styles.wrap}>
       <h1 className="page-title" style={styles.h1}>Claim your assets</h1>
       <p style={styles.lede}>
-        Someone escrowed ANTs or ARIO tokens for you. Connect the Arweave or
-        Ethereum wallet they were sent to, pick the assets to claim, and release
-        them to any Solana wallet you choose. Have a claim link? You can also
-        enter the identifier manually in step 1.
+        Someone set aside ANTs or ARIO tokens for you. Connect the Arweave or
+        Ethereum wallet they were addressed to, pick the assets to claim, and
+        we'll deliver them to any Solana wallet you choose. Have a claim link?
+        You can also enter the identifier manually in step 1.
       </p>
 
       {/* ---- Step 1: find assets ---- */}
-      <StepCard n={1} title="Find your escrowed assets" completed={items.length > 0}>
+      <StepCard n={1} title="Find your assets" completed={items.length > 0}>
         <p style={styles.hint}>
-          Connect the Arweave or Ethereum wallet your assets were sent to, and
-          we'll find everything waiting for you to claim.
+          Connect the Arweave or Ethereum wallet your assets were addressed to,
+          and we'll find everything waiting for you to claim.
         </p>
 
         <div style={styles.connectStack}>
@@ -419,13 +398,13 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         {hasWallet && (
           <div style={styles.discoverySection}>
             {discoveryLoading && (
-              <p style={styles.discoveryLoading}>Checking for assets escrowed to your wallet...</p>
+              <p style={styles.discoveryLoading}>Checking for assets addressed to your wallet...</p>
             )}
             {discoveryError && <p style={styles.discoveryWarning}>{discoveryError}</p>}
             {discoveryDone && !discoveryError && items.length === 0 && (
               <p style={styles.hint}>
-                No assets found escrowed to this wallet. If you have a claim link,
-                paste the identifier below.
+                No assets found for this wallet. If you have a claim link, paste
+                the identifier below.
               </p>
             )}
           </div>
@@ -436,47 +415,38 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           <div style={styles.itemList}>
             <div style={styles.itemListHeader}>
               <span style={styles.discoveryTitle}>
-                {claimableItems.length} claimable asset{claimableItems.length === 1 ? '' : 's'}
+                {items.length} claimable asset{items.length === 1 ? '' : 's'}
               </span>
-              {claimableItems.length > 1 && (
+              {items.length > 1 && (
                 <button type="button" className="btn-text" onClick={toggleSelectAll}>
-                  {allClaimableSelected ? 'Deselect all' : 'Select all'}
+                  {allSelected ? 'Deselect all' : 'Select all'}
                 </button>
               )}
             </div>
-            {items.map((it) => {
-              const claimable = itemProtocol(it) === connectedProtocol;
-              const result = results[it.id];
+            {items.map((a) => {
+              const result = results[a.assetKey];
               return (
                 <label
-                  key={it.id}
+                  key={a.assetKey}
                   style={{
                     ...styles.itemCard,
-                    opacity: claimable ? 1 : 0.55,
-                    cursor: claimable && !running ? 'pointer' : 'default',
+                    cursor: !running ? 'pointer' : 'default',
                   }}
                 >
                   <input
                     type="checkbox"
-                    checked={selectedIds.has(it.id)}
-                    disabled={!claimable || running}
-                    onChange={() => toggleSelected(it.id)}
+                    checked={selectedIds.has(a.assetKey)}
+                    disabled={running}
+                    onChange={() => toggleSelected(a.assetKey)}
                     style={styles.checkbox}
                   />
                   <div style={styles.itemBody}>
-                    <span style={styles.itemTitle}>{itemLabel(it)}</span>
+                    <span style={styles.itemTitle}>{assetLabel(a)}</span>
                     <code style={styles.itemSub}>
-                      {it.kind === 'ant' ? 'ANT' : it.state.assetType === 'vault' ? 'Vault' : 'Tokens'}
+                      {assetKindLabel(a)}
                       {' · '}
-                      {it.id.slice(0, 10)}…{it.id.slice(-4)}
-                      {' · from '}
-                      {it.state.depositor.slice(0, 6)}…{it.state.depositor.slice(-4)}
+                      {a.assetKey.slice(0, 10)}…{a.assetKey.slice(-4)}
                     </code>
-                    {!claimable && (
-                      <span style={styles.itemNote}>
-                        Connect this asset's {itemProtocol(it)} wallet to claim it.
-                      </span>
-                    )}
                     {result && <ResultBadge result={result} />}
                   </div>
                 </label>
@@ -492,18 +462,18 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           onToggle={(e) => setShowManual((e.target as HTMLDetailsElement).open)}
         >
           <summary style={styles.manualSummary}>
-            Have a claim link or escrow address? Enter it manually
+            Have a claim link or asset identifier? Enter it manually
           </summary>
           <input
             type="text"
-            placeholder="ANT mint or escrow address"
-            value={antMint}
-            onChange={(e) => setAntMint(e.target.value)}
+            placeholder="Claim identifier (ANT mint or asset id)"
+            value={assetKeyInput}
+            onChange={(e) => setAssetKeyInput(e.target.value)}
             className="input"
             style={{ ...styles.input, marginTop: '12px' }}
           />
-          {escrowLoading && <p style={styles.hint}>Loading escrow state...</p>}
-          {escrowError && <p style={styles.errorHint}>{escrowError}</p>}
+          {manualLoading && <p style={styles.hint}>Looking up asset...</p>}
+          {manualError && <p style={styles.errorHint}>{manualError}</p>}
         </details>
       </StepCard>
 
@@ -519,8 +489,6 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           placeholder="Solana wallet address"
           value={claimant}
           onChange={(e) => {
-            // Once the user types, stop auto-syncing from the wallet — unless
-            // they clear the field, in which case re-enable auto-fill.
             claimantEditedRef.current = e.target.value.trim().length > 0;
             setClaimant(e.target.value);
           }}
@@ -528,6 +496,13 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           style={styles.input}
           disabled={running}
         />
+        <div style={{ margin: '12px 0' }}>
+          <SolanaWalletConnect
+            onConnect={(pubkey) => setSolPubkey(pubkey)}
+            onDisconnect={() => setSolPubkey(undefined)}
+            connectedPubkey={solPubkey}
+          />
+        </div>
         {publicKey && claimant !== publicKey.toBase58() && (
           <button
             type="button"
@@ -546,6 +521,8 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
           The Solana wallet that will receive every asset you claim
           {publicKey ? ' — pre-filled from your connected wallet' : ''}. This
           address is locked into each signature — no one can redirect it.
+          Connecting a Solana wallet is optional; you can also just paste an
+          address.
         </p>
       </StepCard>
 
@@ -554,32 +531,23 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
         n={3}
         title="Claim selected assets"
         completed={allClaimed}
-        active={isValidClaimant && selectedClaimable.length > 0}
+        active={isValidClaimant && selected.length > 0}
       >
-        {selectedClaimable.length === 0 ? (
+        {selected.length === 0 ? (
           <p style={styles.hint}>Select at least one asset in step 1 to claim.</p>
         ) : allClaimed ? (
           <p style={styles.successHint}>
-            All {selectedClaimable.length} selected asset
-            {selectedClaimable.length === 1 ? '' : 's'} claimed. See each
-            asset's status in step 1.
+            All {selected.length} selected asset{selected.length === 1 ? '' : 's'} claimed.
+            See each asset's status in step 1.
           </p>
         ) : (
           <>
             <p style={styles.hint}>
-              Connect a Solana wallet to pay the network fee and submit the
-              claims. You'll approve each asset in your {connectedProtocol} wallet
-              ({selectedClaimable.length} signature
-              {selectedClaimable.length === 1 ? '' : 's'}) — every asset is
-              authorized separately.
+              You'll approve each asset in your {connectedProtocol} wallet
+              ({selected.length} signature{selected.length === 1 ? '' : 's'}) — every
+              asset is authorized separately. Before each signature we re-verify the
+              message binds this exact asset and your destination wallet.
             </p>
-            <div style={{ margin: '12px 0' }}>
-              <SolanaWalletConnect
-                onConnect={(pubkey) => setSolPubkey(pubkey)}
-                onDisconnect={() => setSolPubkey(undefined)}
-                connectedPubkey={solPubkey}
-              />
-            </div>
             <button
               type="button"
               className="btn-primary"
@@ -593,12 +561,12 @@ export function ClaimPage({ antMint: initialAntMint }: Props) {
             >
               {running
                 ? 'Claiming…'
-                : `Claim ${selectedClaimable.length} asset${selectedClaimable.length === 1 ? '' : 's'}`}
+                : `Claim ${selected.length} asset${selected.length === 1 ? '' : 's'}`}
             </button>
             {successCount > 0 && (
               <p style={styles.successHint}>
-                {successCount} of {selectedClaimable.length} claimed. Progress is
-                shown on each asset in step 1.
+                {successCount} of {selected.length} claimed. Progress is shown on each
+                asset in step 1.
               </p>
             )}
           </>
@@ -614,7 +582,7 @@ function ResultBadge({ result }: { result: ItemResult }) {
   if (result.phase === 'success') {
     return (
       <span style={{ ...styles.badge, ...styles.badgeSuccess }}>
-        ✓ Claimed
+        ✓ {result.message ?? 'Claimed'}
         {result.tx && (
           <a
             href={`https://explorer.solana.com/tx/${result.tx}`}
@@ -628,15 +596,20 @@ function ResultBadge({ result }: { result: ItemResult }) {
       </span>
     );
   }
+  if (result.phase === 'review') {
+    return <span style={{ ...styles.badge, ...styles.badgePending }}>⏳ {result.message}</span>;
+  }
   if (result.phase === 'error') {
     return <span style={{ ...styles.badge, ...styles.badgeError }}>✕ {result.message}</span>;
   }
   const label =
     result.phase === 'queued'
       ? 'Queued…'
-      : result.phase === 'signing'
-        ? result.message || 'Awaiting signature…'
-        : result.message || 'Submitting…';
+      : result.phase === 'initiating'
+        ? result.message || 'Preparing…'
+        : result.phase === 'signing'
+          ? result.message || 'Awaiting signature…'
+          : result.message || 'Submitting…';
   return <span style={{ ...styles.badge, ...styles.badgePending }}>{label}</span>;
 }
 
@@ -751,12 +724,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: brand.black,
   },
   itemSub: { fontSize: '12px', color: brand.textTertiary, fontFamily: 'monospace', wordBreak: 'break-all' as const },
-  itemNote: {
-    fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '12px',
-    color: brand.textTertiary,
-    marginTop: '2px',
-  },
   badge: {
     marginTop: '6px',
     display: 'inline-flex',

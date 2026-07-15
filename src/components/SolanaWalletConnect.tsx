@@ -78,9 +78,9 @@ export function SolanaWalletConnect({
                         No Solana wallet detected
                     </div>
                     <p style={styles.noWalletText}>
-                        You need a Solana wallet to interact with the escrow
-                        program — depositing ANTs, submitting claims, or
-                        paying transaction fees.
+                        Connecting a Solana wallet is optional — it just
+                        auto-fills the destination address your claimed assets
+                        are delivered to. You can also paste an address instead.
                     </p>
                     <div style={styles.walletLinks}>
                         <a
@@ -126,7 +126,7 @@ export function SolanaWalletConnect({
             </button>
             <p style={styles.hint}>
                 Choose from available Solana wallets (Phantom, Solflare, etc.)
-                to interact with the ANT escrow program.
+                to auto-fill the destination address for your claimed assets.
             </p>
         </div>
     );

@@ -12,13 +12,12 @@
     "scripts": {
         "dev": "vite",
         "build": "tsc && vite build",
+        "test": "vitest run",
         "preview": "vite preview",
         "deploy": "yarn build && permaweb-deploy deploy --arns-name \"${VITE_ARNS_NAME:?set VITE_ARNS_NAME to the ArNS name to assign}\""
     },
     "dependencies": {
-        "@ar.io/sdk": "^4.0.3",
-        "@ar.io/solana-contracts": "^1.0.1",
-        "@solana/kit": "^6.8.0",
+        "@noble/hashes": "^1.8.0",
         "@solana/wallet-adapter-base": "^0.9.0",
         "@solana/wallet-adapter-react": "^0.15.0",
         "@solana/wallet-adapter-react-ui": "^0.9.0",
@@ -30,6 +29,10 @@
         "react": "^18.2.0",
         "react-dom": "^18.2.0"
     },
+    "//resolutions": "Collapse @solana/kit to one major. Trezor/@coinbase/cdp-sdk/x402 (transitive via @solana/wallet-adapter-wallets) pin kit 2.x/5.x, giving several coexisting copies. This app registers wallets={[]} (Wallet Standard auto-detect only), so those connectors are never instantiated; forcing one line dedupes them. Verified: yarn build + yarn test green.",
+    "resolutions": {
+        "@solana/kit": "^6.8.0"
+    },
     "devDependencies": {
         "@types/react": "^18.2.0",
         "@types/react-dom": "^18.2.0",
@@ -39,7 +42,8 @@
         "vite": "^5.0.0",
         "vite-plugin-node-polyfills": "^0.22.0",
         "vite-plugin-node-stdlib-browser": "^0.2.1",
-        "vite-plugin-pwa": "^1.2.0"
+        "vite-plugin-pwa": "^1.2.0",
+        "vitest": "^4.1.10"
     },
     "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }
