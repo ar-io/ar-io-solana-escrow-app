@@ -7,19 +7,8 @@ import { WalletModalProvider as _WalletModalProvider } from '@solana/wallet-adap
 
 import { LandingPage } from './pages/LandingPage.tsx';
 import { ClaimPage } from './pages/ClaimPage.tsx';
-import { ManagePage } from './pages/ManagePage.tsx';
-import { LookupPage } from './pages/LookupPage.tsx';
-import { ExplorePage } from './pages/ExplorePage.tsx';
-import { EscrowsProvider } from './context/EscrowsContext.tsx';
-import { AttestorHealthBanner } from './components/AttestorHealthBanner.tsx';
-import { ProgramConfigBanner } from './components/ProgramConfigBanner.tsx';
-import {
-  getEscrowProgramId,
-  setEscrowProgramId,
-  getArioMintOverride,
-  setArioMint,
-  areDepositsEnabled,
-} from './services/solana.ts';
+import { ClaimsHealthBanner } from './components/ClaimsHealthBanner.tsx';
+import { getClaimsApiUrl, setClaimsApiUrl } from './services/claims-api.ts';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -29,9 +18,8 @@ const ConnectionProvider = _ConnectionProvider as any;
 const WalletProvider = _WalletProvider as any;
 const WalletModalProvider = _WalletModalProvider as any;
 
-// Import + re-export: brand is used in this file's styles AND by pages
-// that previously imported from App.tsx. Source of truth is brand.ts
-// (breaks the circular-import TDZ that crashed LandingPage).
+// Import + re-export: brand is used in this file's styles AND by pages that
+// import from App.tsx. Source of truth is brand.ts.
 import { brand } from './brand.js';
 export { brand };
 
@@ -78,7 +66,6 @@ function useHashRoute(): { route: string; query: URLSearchParams } {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  // hash format: "#/<route>?<query>" or "#/"
   const stripped = hash.replace(/^#\//, '');
   const [path, qs = ''] = stripped.split('?');
   return {
@@ -104,23 +91,9 @@ function useMediaQuery(query: string): boolean {
 
 function Router({ route, query }: { route: string; query: URLSearchParams }) {
   switch (route) {
-    // Deposit flows now live as tabs inside the Manage hub. These routes
-    // deep-link into the matching tab; ManagePage falls back to the Manage
-    // tab when deposits are disabled.
-    case 'deposit':
-      return <ManagePage antMint="" initialTab="deposit-ant" />;
-    case 'deposit-tokens':
-      return <ManagePage antMint="" initialTab="deposit-tokens" />;
-    case 'deposit-vault':
-      return <ManagePage antMint="" initialTab="deposit-vault" />;
     case 'claim':
-      return <ClaimPage antMint={query.get('ant') ?? ''} />;
-    case 'manage':
-      return <ManagePage antMint={query.get('ant') ?? ''} />;
-    case 'lookup':
-      return <LookupPage initialAntMint={query.get('ant') ?? ''} />;
-    case 'explore':
-      return <ExplorePage />;
+      // Accept `?asset=` (canonical) or `?ant=` (legacy links) as the deep-link id.
+      return <ClaimPage antMint={query.get('asset') ?? query.get('ant') ?? ''} />;
     case 'home':
     case '':
     default:
@@ -156,27 +129,13 @@ export function App() {
   const wallets = useMemo(() => [], []);
   const { route, query } = useHashRoute();
 
-  const [programId, setProgramId] = useState(() => getEscrowProgramId() ?? '');
-  const [arioMint, setArioMintState] = useState(() => getArioMintOverride());
-  const depositsOn = areDepositsEnabled();
+  const [claimsUrl, setClaimsUrlState] = useState(() => getClaimsApiUrl() ?? '');
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Above 480px the primary links live inline in the header; below, they
-  // collapse into the hamburger menu (which always holds Settings + deposits).
+  // Above 480px the primary link lives inline in the header; below, it collapses
+  // into the hamburger menu (which always holds Settings).
   const isDesktop = useMediaQuery('(min-width: 480px)');
-  const depositNav = depositsOn
-    ? ([
-        ['#/deposit', 'deposit', 'Deposit ANT'],
-        ['#/deposit-tokens', 'deposit-tokens', 'Deposit Tokens'],
-        ['#/deposit-vault', 'deposit-vault', 'Deposit Vault'],
-      ] as const)
-    : ([] as const);
-  const mainNav = [
-    ['#/explore', 'explore', 'Explore'],
-    ['#/claim', 'claim', 'Claim'],
-    ['#/manage', 'manage', 'Manage'],
-    ['#/lookup', 'lookup', 'Lookup'],
-  ] as const;
+  const mainNav = [['#/claim', 'claim', 'Claim']] as const;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -187,17 +146,10 @@ export function App() {
     return () => document.removeEventListener('keydown', onKey);
   }, [menuOpen]);
 
-  const handleProgramIdChange = (value: string) => {
+  const handleClaimsUrlChange = (value: string) => {
     const trimmed = value.trim();
-    setProgramId(trimmed);
-    setEscrowProgramId(trimmed);
-    window.location.reload();
-  };
-
-  const handleArioMintChange = (value: string) => {
-    const trimmed = value.trim();
-    setArioMintState(trimmed);
-    setArioMint(trimmed);
+    setClaimsUrlState(trimmed);
+    setClaimsApiUrl(trimmed);
     window.location.reload();
   };
 
@@ -222,58 +174,47 @@ export function App() {
     <ConnectionProvider endpoint={endpoint}>
       <WalletProvider wallets={wallets}>
         <WalletModalProvider>
-          <EscrowsProvider>
           <div style={styles.container}>
-            <ProgramConfigBanner />
-            <AttestorHealthBanner />
+            <ClaimsHealthBanner />
             <header className="app-header" style={styles.header}>
               <a href="#/" style={styles.logoLink}>
                 <ArioLogo />
-                <span style={styles.badge}>Escrow</span>
+                <span style={styles.badge}>Claims</span>
               </a>
               <div style={styles.headerRight}>
-              {isDesktop && (
-                <nav style={styles.headerNav}>
-                  {mainNav.map(([href, target, label]) => (
-                    <a
-                      key={target}
-                      href={href}
-                      className={`header-nav-link ${route === target ? 'header-nav-link--active' : ''}`}
-                    >
-                      {label}
-                    </a>
-                  ))}
-                </nav>
-              )}
-              <div style={styles.menuWrapper}>
-                <button
-                  className="menu-button"
-                  onClick={() => setMenuOpen(!menuOpen)}
-                  style={styles.menuButton}
-                  aria-label={menuOpen ? 'Close menu' : 'Open menu'}
-                >
-                  {menuOpen ? <CloseIcon /> : <MenuIcon />}
-                </button>
-                {menuOpen && (
-                  <>
-                    <div
-                      style={styles.menuBackdrop}
-                      onClick={() => setMenuOpen(false)}
-                    />
-                    <div className="menu-panel" style={styles.menuPanel}>
-                      {(() => {
-                        // Deposits always live in the menu; the primary links
-                        // only appear here below the desktop breakpoint (they're
-                        // inline in the header above it).
-                        const items = [
-                          ...depositNav,
-                          ...(isDesktop ? [] : mainNav),
-                        ];
-                        if (items.length === 0) return null;
-                        return (
+                {isDesktop && (
+                  <nav style={styles.headerNav}>
+                    {mainNav.map(([href, target, label]) => (
+                      <a
+                        key={target}
+                        href={href}
+                        className={`header-nav-link ${route === target ? 'header-nav-link--active' : ''}`}
+                      >
+                        {label}
+                      </a>
+                    ))}
+                  </nav>
+                )}
+                <div style={styles.menuWrapper}>
+                  <button
+                    className="menu-button"
+                    onClick={() => setMenuOpen(!menuOpen)}
+                    style={styles.menuButton}
+                    aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+                  >
+                    {menuOpen ? <CloseIcon /> : <MenuIcon />}
+                  </button>
+                  {menuOpen && (
+                    <>
+                      <div
+                        style={styles.menuBackdrop}
+                        onClick={() => setMenuOpen(false)}
+                      />
+                      <div className="menu-panel" style={styles.menuPanel}>
+                        {!isDesktop && (
                           <>
                             <nav style={styles.menuNav}>
-                              {items.map(([href, target, label]) => (
+                              {mainNav.map(([href, target, label]) => (
                                 <a
                                   key={target}
                                   href={href}
@@ -286,103 +227,77 @@ export function App() {
                             </nav>
                             <div style={styles.menuDivider} />
                           </>
-                        );
-                      })()}
-                      <div style={styles.menuSection}>
-                        <span style={styles.menuSectionLabel}>Settings</span>
-                        <label style={styles.menuLabel}>RPC Endpoint</label>
-                        <select
-                          value={showCustom ? 'custom' : rpcUrl}
-                          onChange={(e) => handleRpcChange(e.target.value)}
-                          style={styles.menuSelect}
-                        >
-                          {Object.entries(RPC_PRESETS).map(([name, url]) => (
-                            <option key={name} value={url}>
-                              {name}
-                            </option>
-                          ))}
-                          <option value="custom">custom</option>
-                        </select>
-                        {showCustom && (
+                        )}
+                        <div style={styles.menuSection}>
+                          <span style={styles.menuSectionLabel}>Settings</span>
+                          <label style={styles.menuLabel}>Claims API URL</label>
                           <input
                             type="text"
-                            defaultValue={rpcUrl}
-                            placeholder="https://..."
+                            defaultValue={claimsUrl}
+                            placeholder="Required — the claims service"
+                            title={
+                              'Base URL of the ar-io-claims service. Required — ' +
+                              'this is the only backend. Press Enter to apply (reloads).'
+                            }
                             onKeyDown={(e) => {
                               if (e.key === 'Enter')
-                                handleCustomRpc(
-                                  (e.target as HTMLInputElement).value,
-                                );
+                                handleClaimsUrlChange((e.target as HTMLInputElement).value);
                             }}
-                            onBlur={(e) => handleCustomRpc(e.target.value)}
-                            style={styles.menuInput}
+                            onBlur={(e) => {
+                              if (e.target.value.trim() !== claimsUrl)
+                                handleClaimsUrlChange(e.target.value);
+                            }}
+                            style={{
+                              ...styles.menuInput,
+                              borderColor: claimsUrl ? brand.border : brand.warning,
+                            }}
                           />
-                        )}
-                        <label style={styles.menuLabel}>
-                          Escrow Program ID
-                        </label>
-                        <input
-                          type="text"
-                          defaultValue={programId}
-                          placeholder="Required for escrow actions"
-                          title={
-                            'Escrow program ID. Required — the SDK ships no ' +
-                            'program ID for public clusters. Press Enter to apply (reloads).'
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter')
-                              handleProgramIdChange(
-                                (e.target as HTMLInputElement).value,
-                              );
-                          }}
-                          onBlur={(e) => {
-                            if (e.target.value.trim() !== programId)
-                              handleProgramIdChange(e.target.value);
-                          }}
-                          style={{
-                            ...styles.menuInput,
-                            borderColor: programId
-                              ? brand.border
-                              : brand.warning,
-                          }}
-                        />
-                        <label style={styles.menuLabel}>ARIO Mint</label>
-                        <input
-                          type="text"
-                          defaultValue={arioMint}
-                          placeholder="Auto-detected"
-                          title={
-                            'ARIO SPL mint override. Leave blank for network ' +
-                            'default. Press Enter to apply (reloads).'
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter')
-                              handleArioMintChange(
-                                (e.target as HTMLInputElement).value,
-                              );
-                          }}
-                          onBlur={(e) => {
-                            if (e.target.value.trim() !== arioMint)
-                              handleArioMintChange(e.target.value);
-                          }}
-                          style={styles.menuInput}
-                        />
+                          <label style={styles.menuLabel}>RPC Endpoint</label>
+                          <select
+                            value={showCustom ? 'custom' : rpcUrl}
+                            onChange={(e) => handleRpcChange(e.target.value)}
+                            style={styles.menuSelect}
+                          >
+                            {Object.entries(RPC_PRESETS).map(([name, url]) => (
+                              <option key={name} value={url}>
+                                {name}
+                              </option>
+                            ))}
+                            <option value="custom">custom</option>
+                          </select>
+                          {showCustom && (
+                            <input
+                              type="text"
+                              defaultValue={rpcUrl}
+                              placeholder="https://..."
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter')
+                                  handleCustomRpc((e.target as HTMLInputElement).value);
+                              }}
+                              onBlur={(e) => handleCustomRpc(e.target.value)}
+                              style={styles.menuInput}
+                            />
+                          )}
+                          <span style={styles.menuNote}>
+                            The RPC only sets the network label + backs the optional
+                            Solana wallet connection. No transactions are sent here.
+                          </span>
+                        </div>
+                        <div style={styles.menuDivider} />
+                        <div style={styles.menuLinks}>
+                          <a
+                            href="https://docs.ar.io"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="menu-ext-link"
+                          >
+                            Docs
+                          </a>
+                        </div>
                       </div>
-                      <div style={styles.menuDivider} />
-                      <div style={styles.menuLinks}>
-                        <a
-                          href="https://docs.ar.io"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="menu-ext-link"
-                        >
-                          Docs
-                        </a>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
+                    </>
+                  )}
+                </div>
               </div>
             </header>
             <main className="app-main" style={styles.main}>
@@ -403,7 +318,6 @@ export function App() {
               </span>
             </footer>
           </div>
-          </EscrowsProvider>
         </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
@@ -537,6 +451,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '12px',
     fontWeight: 600,
     color: brand.textSecondary,
+  },
+  menuNote: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '11px',
+    color: brand.textTertiary,
+    lineHeight: 1.4,
   },
   menuSelect: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
