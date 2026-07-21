@@ -9,6 +9,7 @@ import { LandingPage } from './pages/LandingPage.tsx';
 import { ClaimPage } from './pages/ClaimPage.tsx';
 import { ClaimsHealthBanner } from './components/ClaimsHealthBanner.tsx';
 import { getClaimsApiUrl, setClaimsApiUrl } from './services/claims-api.ts';
+import { getNetwork } from './services/solana.ts';
 
 import '@solana/wallet-adapter-react-ui/styles.css';
 
@@ -34,6 +35,23 @@ function ArioLogo() {
       <path d="M764.83 117.42C784.61 142.03 794.51 171.12 794.51 204.69C794.51 238.26 784.62 268.03 764.83 292.28C745.05 316.54 715.01 328.66 674.73 328.66C634.45 328.66 604.41 316.53 584.63 292.28C564.85 268.03 554.95 238.83 554.95 204.69C554.95 170.55 564.84 142.03 584.63 117.42C604.41 92.81 634.45 80.5 674.73 80.5C715.01 80.5 745.05 92.81 764.83 117.42ZM674.51 131.93C656.59 131.93 642.79 138.22 633.11 150.82C623.44 163.41 618.6 181.37 618.6 204.7C618.6 228.03 623.44 246.03 633.11 258.69C642.79 271.35 656.58 277.68 674.51 277.68C692.44 277.68 706.19 271.35 715.8 258.69C725.4 246.03 730.21 228.04 730.21 204.7C730.21 181.36 725.4 163.41 715.8 150.82C706.19 138.23 692.43 131.93 674.51 131.93Z" fill="#23232D"/>
       <path d="M423.07 320.51C439.638 320.51 453.07 307.079 453.07 290.51C453.07 273.941 439.638 260.51 423.07 260.51C406.501 260.51 393.07 273.941 393.07 290.51C393.07 307.079 406.501 320.51 423.07 320.51Z" fill="#23232D"/>
     </svg>
+  );
+}
+
+/** Persistent network indicator. Devnet is styled prominently (amber/warning)
+ *  so a test build is never mistaken for mainnet; mainnet is subtle/neutral. */
+function NetworkBadge() {
+  const isDevnet = getNetwork() === 'solana-devnet';
+  return (
+    <span
+      style={{
+        ...styles.badge,
+        ...(isDevnet ? styles.networkBadgeDevnet : styles.networkBadgeMainnet),
+      }}
+      title={isDevnet ? 'Connected to Solana devnet' : 'Connected to Solana mainnet'}
+    >
+      {isDevnet ? 'Devnet' : 'Mainnet'}
+    </span>
   );
 }
 
@@ -182,6 +200,7 @@ export function App() {
                 <span style={styles.badge}>Claims</span>
               </a>
               <div style={styles.headerRight}>
+                <NetworkBadge />
                 {isDesktop && (
                   <nav style={styles.headerNav}>
                     {mainNav.map(([href, target, label]) => (
@@ -367,6 +386,14 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex',
     alignItems: 'center',
     gap: '6px',
+  },
+  networkBadgeDevnet: {
+    background: brand.warningBg,
+    color: brand.warning,
+  },
+  networkBadgeMainnet: {
+    background: brand.cardSurface,
+    color: brand.textSecondary,
   },
   main: {
     flex: 1,

@@ -48,3 +48,15 @@ export function getNetwork(rpcUrl: string = getRpcUrl()): EscrowNetwork {
   }
   return /mainnet/.test(rpcUrl) ? 'solana-mainnet' : 'solana-devnet';
 }
+
+/**
+ * Solana Explorer URL for a transaction signature. On devnet the explorer
+ * needs `?cluster=devnet`, otherwise the link 404s.
+ */
+export function explorerTxUrl(
+  sig: string,
+  network: EscrowNetwork = getNetwork(),
+): string {
+  const base = `https://explorer.solana.com/tx/${sig}`;
+  return network === 'solana-devnet' ? `${base}?cluster=devnet` : base;
+}

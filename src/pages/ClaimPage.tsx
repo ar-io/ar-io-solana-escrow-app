@@ -11,7 +11,7 @@ import { StepCard } from '../components/StepCard.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
 import { ArweaveWalletConnect } from '../components/ArweaveWalletConnect.tsx';
 import { EthereumWalletConnect } from '../components/EthereumWalletConnect.tsx';
-import { getNetwork, type EscrowNetwork } from '../services/solana.ts';
+import { getNetwork, explorerTxUrl, type EscrowNetwork } from '../services/solana.ts';
 import {
   getClaimable,
   getAsset,
@@ -43,14 +43,26 @@ interface ItemResult {
   tx?: string;
 }
 
+/** Human label for the protocol a wallet speaks, for display to the user. */
+const protocolLabel: Record<ClaimProtocol, string> = {
+  arweave: 'Arweave',
+  ethereum: 'Ethereum',
+};
+
 /** Human label for a claimable asset. */
 function assetLabel(a: ClaimableAssetView): string {
-  if (a.assetType === 'ant') return `ANT ${a.antMint ?? a.assetKey}`;
+  if (a.assetType === 'ant') {
+    // The claims API returns no ArNS name for an ANT, only its mint — so we
+    // truncate the mint like the sub-label. Showing the real ArNS name would
+    // require the claims API to return it.
+    const mint = a.antMint ?? a.assetKey;
+    return `ANT ${mint.slice(0, 6)}…${mint.slice(-4)}`;
+  }
   const amount = a.amount ? formatMarioToArio(BigInt(a.amount)) : '?';
   return a.assetType === 'vault' ? `${amount} ARIO vault` : `${amount} ARIO`;
 }
 function assetKindLabel(a: ClaimableAssetView): string {
-  return a.assetType === 'ant' ? 'ANT' : a.assetType === 'vault' ? 'Vault' : 'Tokens';
+  return a.assetType === 'ant' ? 'ANT' : a.assetType === 'vault' ? 'Vault' : 'ARIO';
 }
 
 /**
@@ -315,9 +327,18 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             },
           }));
         } else if (status.status === 'pending_review') {
+          // A still-locked vault isn't "under review" — it's delivered when it
+          // unlocks. vaultEndTimestamp is epoch milliseconds (matches the
+          // claims service, which compares it against Date.now()).
+          const message =
+            asset.assetType === 'vault' && asset.vaultEndTimestamp
+              ? `Still time-locked — delivered when it unlocks on ${new Date(
+                  asset.vaultEndTimestamp,
+                ).toLocaleString()}.`
+              : 'Submitted for review.';
           setResults((prev) => ({
             ...prev,
-            [asset.assetKey]: { phase: 'review', message: 'Submitted for review.' },
+            [asset.assetKey]: { phase: 'review', message },
           }));
         } else {
           setResults((prev) => ({
@@ -400,7 +421,7 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             {discoveryLoading && (
               <p style={styles.discoveryLoading}>Checking for assets addressed to your wallet...</p>
             )}
-            {discoveryError && <p style={styles.discoveryWarning}>{discoveryError}</p>}
+            {discoveryError && <p style={styles.discoveryError}>{discoveryError}</p>}
             {discoveryDone && !discoveryError && items.length === 0 && (
               <p style={styles.hint}>
                 No assets found for this wallet. If you have a claim link, paste
@@ -543,7 +564,8 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         ) : (
           <>
             <p style={styles.hint}>
-              You'll approve each asset in your {connectedProtocol} wallet
+              You'll approve each asset in your{' '}
+              {connectedProtocol ? protocolLabel[connectedProtocol] : ''} wallet
               ({selected.length} signature{selected.length === 1 ? '' : 's'}) — every
               asset is authorized separately. Before each signature we re-verify the
               message binds this exact asset and your destination wallet.
@@ -585,7 +607,7 @@ function ResultBadge({ result }: { result: ItemResult }) {
         ✓ {result.message ?? 'Claimed'}
         {result.tx && (
           <a
-            href={`https://explorer.solana.com/tx/${result.tx}`}
+            href={explorerTxUrl(result.tx)}
             target="_blank"
             rel="noopener noreferrer"
             style={styles.badgeLink}
@@ -681,11 +703,12 @@ const styles: Record<string, React.CSSProperties> = {
     margin: 0,
     fontStyle: 'italic' as const,
   },
-  discoveryWarning: {
+  discoveryError: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     fontSize: '13px',
-    color: brand.textTertiary,
+    color: brand.error,
     margin: 0,
+    fontWeight: 600,
   },
   discoveryTitle: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
