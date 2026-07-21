@@ -42,6 +42,8 @@ const ASSET: ClaimableAssetView = {
   vaultEndTimestamp: null,
   nonceHex: '00'.repeat(32),
   status: 'available',
+  claimStatus: null,
+  claimTx: null,
 };
 
 /** What the server signs. Vary claimant/network to simulate a hostile server. */

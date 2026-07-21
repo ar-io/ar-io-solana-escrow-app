@@ -109,7 +109,12 @@ export interface ClaimableAssetView {
   amount: string | null;
   vaultEndTimestamp: number | null;
   nonceHex: string;
+  /** Asset lifecycle: `available` (self-serve) or `claimed` (history, when includeClaimed). */
   status: string;
+  /** For a `claimed` asset: the winning claim's status (e.g. `confirmed`); null otherwise. */
+  claimStatus: string | null;
+  /** For a `claimed` asset: the on-chain dispatch tx signature (for an explorer link); null otherwise. */
+  claimTx: string | null;
 }
 
 export interface ClaimableResult {
@@ -244,11 +249,14 @@ export async function getClaimable(params: {
   recipientId?: string;
   protocol?: string;
   address?: string;
+  /** Also return the recipient's already-`claimed` assets as history. */
+  includeClaimed?: boolean;
 }): Promise<ClaimableResult> {
   const q = new URLSearchParams();
   if (params.recipientId) q.set('recipientId', params.recipientId);
   if (params.protocol) q.set('protocol', params.protocol);
   if (params.address) q.set('address', params.address);
+  if (params.includeClaimed) q.set('includeClaimed', '1');
   try {
     return await request<ClaimableResult>(`/v1/claimable?${q.toString()}`);
   } catch (e) {
