@@ -37,6 +37,7 @@ const ASSET: ClaimableAssetView = {
   assetKey: '11'.repeat(32), // 32-byte asset id, hex — a token escrow
   assetType: 'token',
   antMint: null,
+  name: null,
   amount: '123456789',
   vaultEndTimestamp: null,
   nonceHex: '00'.repeat(32),

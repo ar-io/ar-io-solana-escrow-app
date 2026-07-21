@@ -103,6 +103,8 @@ export interface ClaimableAssetView {
   assetType: ClaimAssetType;
   /** base58 ANT mint for `ant` assets; null otherwise. Equals `assetKey`. */
   antMint: string | null;
+  /** ANT's on-chain ArNS name (MPL Core `name`); null for token/vault or un-backfilled ANTs. Display-only. */
+  name: string | null;
   /** mARIO decimal string for token/vault; null for ANTs. */
   amount: string | null;
   vaultEndTimestamp: number | null;
