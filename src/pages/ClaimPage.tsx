@@ -52,9 +52,9 @@ const protocolLabel: Record<ClaimProtocol, string> = {
 /** Human label for a claimable asset. */
 function assetLabel(a: ClaimableAssetView): string {
   if (a.assetType === 'ant') {
-    // The claims API returns no ArNS name for an ANT, only its mint — so we
-    // truncate the mint like the sub-label. Showing the real ArNS name would
-    // require the claims API to return it.
+    // Prefer the ANT's on-chain ArNS name (e.g. `wolfethyst`) as the title.
+    // Falls back to the truncated mint when the name has not been backfilled.
+    if (a.name) return a.name;
     const mint = a.antMint ?? a.assetKey;
     return `ANT ${mint.slice(0, 6)}…${mint.slice(-4)}`;
   }
