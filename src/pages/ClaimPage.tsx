@@ -15,8 +15,10 @@ import { getNetwork, explorerTxUrl, type EscrowNetwork } from '../services/solan
 import {
   getClaimable,
   getAsset,
+  getClaim,
   type ClaimableAssetView,
   type ClaimProtocol,
+  type ClaimStatusView,
 } from '../services/claims-api.ts';
 import {
   claimAsset,
@@ -139,7 +141,7 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         const modulus = parseArweaveModulus(await lookupArweaveModulus(arweaveAddress));
         if (cancelled) return;
         setIdentity({ protocol: 'arweave', pubkey: modulus });
-        const res = await getClaimable({ protocol: 'arweave', address: arweaveAddress });
+        const res = await getClaimable({ protocol: 'arweave', address: arweaveAddress, includeClaimed: true });
         if (!cancelled) {
           setAssets(res.assets);
           setDiscoveryDone(true);
@@ -169,7 +171,7 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
       setIdentity(null);
       try {
         setIdentity({ protocol: 'ethereum', pubkey: parseEthereumAddress(ethereumAddress) });
-        const res = await getClaimable({ protocol: 'ethereum', address: ethereumAddress });
+        const res = await getClaimable({ protocol: 'ethereum', address: ethereumAddress, includeClaimed: true });
         if (!cancelled) {
           setAssets(res.assets);
           setDiscoveryDone(true);
@@ -244,10 +246,18 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
     const map = new Map<string, ClaimableAssetView>();
     for (const a of assets) map.set(a.assetKey, a);
     if (manualAsset) map.set(manualAsset.assetKey, manualAsset);
-    return [...map.values()];
+    // Available first, then claimed history.
+    return [...map.values()].sort(
+      (x, y) => Number(x.status === 'claimed') - Number(y.status === 'claimed'),
+    );
   }, [assets, manualAsset]);
 
-  // Default-select each item the first time it appears.
+  // Only `available` assets are actionable; `claimed` ones render as history
+  // (disabled, non-selectable) so a user can see what they already claimed.
+  const availableItems = useMemo(() => items.filter((a) => a.status !== 'claimed'), [items]);
+  const claimedItems = useMemo(() => items.filter((a) => a.status === 'claimed'), [items]);
+
+  // Default-select each AVAILABLE item the first time it appears (never claimed).
   const seenIds = useRef<Set<string>>(new Set());
   useEffect(() => {
     setSelectedIds((prev) => {
@@ -255,7 +265,7 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
       for (const a of items) {
         if (!seenIds.current.has(a.assetKey)) {
           seenIds.current.add(a.assetKey);
-          next.add(a.assetKey);
+          if (a.status !== 'claimed') next.add(a.assetKey);
         }
       }
       return next;
@@ -272,31 +282,86 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
   }, []);
 
   const selected = useMemo(
-    () => items.filter((a) => selectedIds.has(a.assetKey)),
-    [items, selectedIds],
+    () => availableItems.filter((a) => selectedIds.has(a.assetKey)),
+    [availableItems, selectedIds],
   );
-  const allSelected = items.length > 0 && selected.length === items.length;
+  const allSelected = availableItems.length > 0 && selected.length === availableItems.length;
 
   const toggleSelectAll = useCallback(() => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (items.every((a) => next.has(a.assetKey))) {
-        for (const a of items) next.delete(a.assetKey);
+      if (availableItems.every((a) => next.has(a.assetKey))) {
+        for (const a of availableItems) next.delete(a.assetKey);
       } else {
-        for (const a of items) next.add(a.assetKey);
+        for (const a of availableItems) next.add(a.assetKey);
       }
       return next;
     });
-  }, [items]);
+  }, [availableItems]);
 
   // -------------------------------------------------------------------
   // Run the batch claim
   // -------------------------------------------------------------------
   const isValidClaimant = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(claimant.trim());
 
+  // -------------------------------------------------------------------
+  // Background confirmation polling (FIX #1)
+  // -------------------------------------------------------------------
+  // The worker settles on a ~30s cadence, so a freshly-completed claim comes
+  // back `verified`/`dispatching` ("Settling…"). Keep polling that claim in the
+  // BACKGROUND (bounded) and flip the badge to Confirmed (+ tx View) when it
+  // lands — without blocking the UI or the batch loop.
+  const pollControllers = useRef<Map<string, { cancelled: boolean }>>(new Map());
+  const cancelAllPolls = useCallback(() => {
+    for (const c of pollControllers.current.values()) c.cancelled = true;
+    pollControllers.current.clear();
+  }, []);
+  // Cancel every outstanding poll on unmount.
+  useEffect(() => () => cancelAllPolls(), [cancelAllPolls]);
+
+  const pollToConfirmation = useCallback((assetKey: string, claimId: string) => {
+    // Supersede any existing poll for this asset.
+    const prior = pollControllers.current.get(assetKey);
+    if (prior) prior.cancelled = true;
+    const ctrl = { cancelled: false };
+    pollControllers.current.set(assetKey, ctrl);
+
+    const intervalMs = 5_000;
+    const deadline = Date.now() + 4 * 60_000; // give the ~30s worker several cycles
+    void (async () => {
+      while (!ctrl.cancelled && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+        if (ctrl.cancelled) return;
+        let s: ClaimStatusView;
+        try {
+          s = await getClaim(claimId);
+        } catch {
+          continue; // transient RPC/API blip — keep trying until the deadline
+        }
+        if (ctrl.cancelled) return;
+        const tx = s.txSignatures[0];
+        if (s.status === 'confirmed') {
+          setResults((prev) => ({ ...prev, [assetKey]: { phase: 'success', tx, message: undefined } }));
+          break;
+        }
+        if (s.status === 'failed' || s.status === 'rejected' || s.status === 'expired') {
+          setResults((prev) => ({ ...prev, [assetKey]: { phase: 'error', message: s.error ?? `Claim ${s.status}.` } }));
+          break;
+        }
+        if (s.status === 'needs_operator' || s.status === 'awaiting_manual_vault_delivery') {
+          setResults((prev) => ({ ...prev, [assetKey]: { phase: 'review', message: 'Awaiting operator delivery.' } }));
+          break;
+        }
+        // still verified / dispatching -> keep "Settling…" and poll again.
+      }
+      pollControllers.current.delete(assetKey);
+    })();
+  }, []);
+
   const runBatch = useCallback(async () => {
     if (!identity || !isValidClaimant || selected.length === 0) return;
     setRunning(true);
+    cancelAllPolls(); // supersede any polls from a previous run
     const claimantTrim = claimant.trim();
 
     setResults((prev) => {
@@ -318,14 +383,18 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         });
         const tx = status.txSignatures[0];
         if (status.status === 'confirmed' || status.status === 'verified' || status.status === 'dispatching') {
+          const settling = status.status !== 'confirmed';
           setResults((prev) => ({
             ...prev,
             [asset.assetKey]: {
               phase: 'success',
               tx,
-              message: status.status === 'confirmed' ? undefined : 'Settling…',
+              message: settling ? 'Settling…' : undefined,
             },
           }));
+          // Not yet confirmed on-chain — keep polling in the background so the
+          // badge updates to Confirmed (+ View) without a manual refresh.
+          if (settling) pollToConfirmation(asset.assetKey, status.claimId);
         } else if (status.status === 'pending_review') {
           // A still-locked vault isn't "under review" — it's delivered when it
           // unlocks. vaultEndTimestamp is epoch milliseconds (matches the
@@ -360,7 +429,7 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
     }
 
     setRunning(false);
-  }, [identity, isValidClaimant, selected, claimant, network, ethereumProvider]);
+  }, [identity, isValidClaimant, selected, claimant, network, ethereumProvider, cancelAllPolls, pollToConfirmation]);
 
   // -------------------------------------------------------------------
   // Render
@@ -436,9 +505,15 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
           <div style={styles.itemList}>
             <div style={styles.itemListHeader}>
               <span style={styles.discoveryTitle}>
-                {items.length} claimable asset{items.length === 1 ? '' : 's'}
+                {availableItems.length} claimable asset{availableItems.length === 1 ? '' : 's'}
+                {claimedItems.length > 0 && (
+                  <span style={styles.claimedCount}>
+                    {' · '}
+                    {claimedItems.length} already claimed
+                  </span>
+                )}
               </span>
-              {items.length > 1 && (
+              {availableItems.length > 1 && (
                 <button type="button" className="btn-text" onClick={toggleSelectAll}>
                   {allSelected ? 'Deselect all' : 'Select all'}
                 </button>
@@ -446,29 +521,36 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             </div>
             {items.map((a) => {
               const result = results[a.assetKey];
+              const claimed = a.status === 'claimed';
               return (
                 <label
                   key={a.assetKey}
                   style={{
                     ...styles.itemCard,
-                    cursor: !running ? 'pointer' : 'default',
+                    ...(claimed ? styles.itemCardClaimed : null),
+                    cursor: claimed ? 'default' : !running ? 'pointer' : 'default',
                   }}
                 >
                   <input
                     type="checkbox"
-                    checked={selectedIds.has(a.assetKey)}
-                    disabled={running}
+                    checked={!claimed && selectedIds.has(a.assetKey)}
+                    disabled={running || claimed}
                     onChange={() => toggleSelected(a.assetKey)}
                     style={styles.checkbox}
+                    aria-label={claimed ? 'Already claimed' : 'Select to claim'}
                   />
-                  <div style={styles.itemBody}>
+                  <div style={{ ...styles.itemBody, ...(claimed ? styles.itemBodyClaimed : null) }}>
                     <span style={styles.itemTitle}>{assetLabel(a)}</span>
                     <code style={styles.itemSub}>
                       {assetKindLabel(a)}
                       {' · '}
                       {a.assetKey.slice(0, 10)}…{a.assetKey.slice(-4)}
                     </code>
-                    {result && <ResultBadge result={result} />}
+                    {claimed ? (
+                      <ClaimedBadge tx={a.claimTx} />
+                    ) : (
+                      result && <ResultBadge result={result} />
+                    )}
                   </div>
                 </label>
               );
@@ -599,6 +681,25 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
 }
 
 // ---------------------------------------------------------------------------
+
+/** Static "Claimed ✓" badge for an already-claimed asset (history), with a tx link. */
+function ClaimedBadge({ tx }: { tx: string | null }) {
+  return (
+    <span style={{ ...styles.badge, ...styles.badgeSuccess }}>
+      ✓ Claimed
+      {tx && (
+        <a
+          href={explorerTxUrl(tx)}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={styles.badgeLink}
+        >
+          View
+        </a>
+      )}
+    </span>
+  );
+}
 
 function ResultBadge({ result }: { result: ItemResult }) {
   if (result.phase === 'success') {
@@ -738,6 +839,13 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '16px',
     boxShadow: '0 1px 3px rgba(35, 35, 45, 0.04)',
   },
+  // Claimed history rows read as done: muted surface, no elevation.
+  itemCardClaimed: {
+    background: brand.cardSurface,
+    boxShadow: 'none',
+  },
+  itemBodyClaimed: { opacity: 0.7 },
+  claimedCount: { color: brand.textTertiary, fontWeight: 600 },
   checkbox: { width: '17px', height: '17px', marginTop: '2px', flexShrink: 0, accentColor: brand.primary },
   itemBody: { display: 'flex', flexDirection: 'column' as const, gap: '3px', minWidth: 0, flex: 1 },
   itemTitle: {
