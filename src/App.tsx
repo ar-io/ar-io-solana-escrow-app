@@ -153,7 +153,10 @@ export function App() {
   // Above 480px the primary link lives inline in the header; below, it collapses
   // into the hamburger menu (which always holds Settings).
   const isDesktop = useMediaQuery('(min-width: 480px)');
-  const mainNav = [['#/claim', 'claim', 'Claim']] as const;
+  const mainNav = [
+    ['#/claim', 'claim', 'Claim'],
+    ['https://ar.io/solana-migration/ar.io', 'more-info', 'More Info'],
+  ] as const;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -207,6 +210,7 @@ export function App() {
                       <a
                         key={target}
                         href={href}
+                        {...(href.startsWith('http') ? { target: '_blank', rel: 'noreferrer' } : {})}
                         className={`header-nav-link ${route === target ? 'header-nav-link--active' : ''}`}
                       >
                         {label}
@@ -237,6 +241,7 @@ export function App() {
                                 <a
                                   key={target}
                                   href={href}
+                                  {...(href.startsWith('http') ? { target: '_blank', rel: 'noreferrer' } : {})}
                                   className={`menu-nav-link ${route === target ? 'menu-nav-link--active' : ''}`}
                                   onClick={() => setMenuOpen(false)}
                                 >
