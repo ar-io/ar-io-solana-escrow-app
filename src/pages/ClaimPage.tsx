@@ -772,6 +772,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
   },
   submit: {
+    marginTop: '20px',
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     padding: '12px 24px',
     border: 'none',
