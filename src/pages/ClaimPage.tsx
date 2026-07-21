@@ -438,12 +438,40 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
   const successCount = Object.values(results).filter(
     (r) => r.phase === 'success' || r.phase === 'review',
   ).length;
+  // Live per-run progress over the SELECTED batch, surfaced directly in Step 3.
+  // "Confirmed" = fully settled on-chain (success, not the interim "Settling…")
+  // or a delivered/queued review outcome; "settling" = success awaiting on-chain
+  // confirmation (still polling in the background).
+  const confirmedCount = selected.filter((a) => {
+    const r = results[a.assetKey];
+    return !!r && ((r.phase === 'success' && r.message !== 'Settling…') || r.phase === 'review');
+  }).length;
+  const settlingCount = selected.filter((a) => {
+    const r = results[a.assetKey];
+    return !!r && r.phase === 'success' && r.message === 'Settling…';
+  }).length;
   const allClaimed =
     selected.length > 0 &&
     selected.every(
       (a) => results[a.assetKey]?.phase === 'success' || results[a.assetKey]?.phase === 'review',
     );
   const canClaim = !!identity && isValidClaimant && selected.length > 0 && !running;
+
+  // Disconnect the current recipient wallet and reset the flow back to Step 1 so
+  // discovery re-runs for a different wallet. Clearing the identity addresses
+  // trips the reset effect above, which clears discovered assets + identity.
+  const claimWithAnotherWallet = useCallback(() => {
+    cancelAllPolls();
+    setArweaveAddress(undefined);
+    setEthereumAddress(undefined);
+    setEthereumProvider(undefined);
+    setResults({});
+    setSelectedIds(new Set());
+    setManualAsset(null);
+    setAssetKeyInput('');
+    seenIds.current = new Set();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [cancelAllPolls]);
 
   return (
     <div style={styles.wrap}>
@@ -587,6 +615,11 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         completed={isValidClaimant}
         active={items.length > 0}
       >
+        <p style={{ ...styles.hint, marginTop: 0, marginBottom: '12px' }}>
+          This destination is independent of the wallet you prove ownership with —
+          you can reuse the same Solana address across your Arweave and Ethereum
+          claims.
+        </p>
         <input
           type="text"
           placeholder="Solana wallet address"
@@ -639,10 +672,25 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         {selected.length === 0 ? (
           <p style={styles.hint}>Select at least one asset in step 1 to claim.</p>
         ) : allClaimed ? (
-          <p style={styles.successHint}>
-            All {selected.length} selected asset{selected.length === 1 ? '' : 's'} claimed.
-            See each asset's status in step 1.
-          </p>
+          <>
+            <p style={styles.successHint}>
+              All {selected.length} claimed 🎉
+            </p>
+            {settlingCount > 0 && (
+              <p style={styles.hint}>
+                Finishing on-chain settlement for {settlingCount} — your assets are on
+                their way.
+              </p>
+            )}
+            <button
+              type="button"
+              className="btn-secondary"
+              style={styles.anotherWallet}
+              onClick={claimWithAnotherWallet}
+            >
+              Claim with another wallet
+            </button>
+          </>
         ) : (
           <>
             <p style={styles.hint}>
@@ -663,14 +711,18 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
               disabled={!canClaim}
               onClick={runBatch}
             >
-              {running
-                ? 'Claiming…'
-                : `Claim ${selected.length} asset${selected.length === 1 ? '' : 's'}`}
+              {running ? (
+                <span style={styles.btnBusy}>
+                  <Spinner onPrimary /> Claiming…
+                </span>
+              ) : (
+                `Claim ${selected.length} asset${selected.length === 1 ? '' : 's'}`
+              )}
             </button>
-            {successCount > 0 && (
+            {(confirmedCount > 0 || settlingCount > 0) && (
               <p style={styles.successHint}>
-                {successCount} of {selected.length} claimed. Progress is shown on each
-                asset in step 1.
+                {confirmedCount} of {selected.length} confirmed
+                {settlingCount > 0 ? ' — settling the rest…' : ''}
               </p>
             )}
           </>
@@ -701,8 +753,28 @@ function ClaimedBadge({ tx }: { tx: string | null }) {
   );
 }
 
+/** Subtle inline loading spinner (bordered circle in brand.primary). */
+function Spinner({ onPrimary }: { onPrimary?: boolean }) {
+  return (
+    <span
+      className={onPrimary ? 'spinner spinner-on-primary' : 'spinner'}
+      aria-hidden="true"
+    />
+  );
+}
+
 function ResultBadge({ result }: { result: ItemResult }) {
   if (result.phase === 'success') {
+    // A settled-but-not-yet-confirmed claim ("Settling…") is still in flight —
+    // render it as a pending state with a spinner rather than a green ✓.
+    const settling = result.message === 'Settling…';
+    if (settling) {
+      return (
+        <span style={{ ...styles.badge, ...styles.badgePending }}>
+          <Spinner /> {result.message}
+        </span>
+      );
+    }
     return (
       <span style={{ ...styles.badge, ...styles.badgeSuccess }}>
         ✓ {result.message ?? 'Claimed'}
@@ -733,7 +805,11 @@ function ResultBadge({ result }: { result: ItemResult }) {
         : result.phase === 'signing'
           ? result.message || 'Awaiting signature…'
           : result.message || 'Submitting…';
-  return <span style={{ ...styles.badge, ...styles.badgePending }}>{label}</span>;
+  return (
+    <span style={{ ...styles.badge, ...styles.badgePending }}>
+      <Spinner /> {label}
+    </span>
+  );
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -891,5 +967,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: 'pointer',
     transition: 'all 0.2s ease',
+  },
+  btnBusy: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '9px',
+  },
+  anotherWallet: {
+    marginTop: '16px',
+    alignSelf: 'flex-start',
   },
 };
