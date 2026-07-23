@@ -43,6 +43,8 @@ interface ItemResult {
   phase: ItemResultPhase;
   message?: string;
   tx?: string;
+  /** A `review` outcome that is a still-time-locked vault (calm, not an error). */
+  locked?: boolean;
 }
 
 /** Human label for the protocol a wallet speaks, for display to the user. */
@@ -65,6 +67,50 @@ function assetLabel(a: ClaimableAssetView): string {
 }
 function assetKindLabel(a: ClaimableAssetView): string {
   return a.assetType === 'ant' ? 'ANT' : a.assetType === 'vault' ? 'Vault' : 'ARIO';
+}
+
+// ---------------------------------------------------------------------------
+// Vault time-lock helpers
+//
+// `vaultEndTimestamp` is UNIX SECONDS on the wire (the claims service stores
+// `vault_end_ts` in seconds and compares it against `Math.floor(Date.now()/1000)`).
+// The UI works in milliseconds, so every read multiplies by 1000. A vault whose
+// unlock is still in the future is TIME-LOCKED: claiming it does not dispense —
+// the service queues it for automatic delivery to the destination at unlock. An
+// already-expired vault dispenses immediately as liquid ARIO (handled as a normal
+// success).
+// ---------------------------------------------------------------------------
+
+/** Vault unlock time in ms, or null for non-vaults / vaults without an end. */
+function vaultUnlockMs(a: ClaimableAssetView): number | null {
+  return a.assetType === 'vault' && a.vaultEndTimestamp != null
+    ? a.vaultEndTimestamp * 1000
+    : null;
+}
+
+/** True when this is a vault whose unlock time is still in the future. */
+function isVaultLocked(a: ClaimableAssetView): boolean {
+  const ms = vaultUnlockMs(a);
+  return ms != null && ms > Date.now();
+}
+
+/** Human-readable unlock date, e.g. "Feb 6, 2027". */
+function formatUnlockDate(ms: number): string {
+  return new Date(ms).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+/** Calm, accurate post-claim copy for a still-time-locked vault. */
+function lockedVaultMessage(a: ClaimableAssetView, claimant: string): string {
+  const ms = vaultUnlockMs(a);
+  const dest = claimant
+    ? `${claimant.slice(0, 4)}…${claimant.slice(-4)}`
+    : 'your Solana wallet';
+  const when = ms ? ` on ${formatUnlockDate(ms)}` : '';
+  return `Time-locked — the ARIO will be delivered to ${dest} automatically when it unlocks${when}. Nothing more to do.`;
 }
 
 /**
@@ -319,7 +365,7 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
   // Cancel every outstanding poll on unmount.
   useEffect(() => () => cancelAllPolls(), [cancelAllPolls]);
 
-  const pollToConfirmation = useCallback((assetKey: string, claimId: string) => {
+  const pollToConfirmation = useCallback((assetKey: string, claimId: string, lockedMessage?: string) => {
     // Supersede any existing poll for this asset.
     const prior = pollControllers.current.get(assetKey);
     if (prior) prior.cancelled = true;
@@ -349,7 +395,14 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
           break;
         }
         if (s.status === 'needs_operator' || s.status === 'awaiting_manual_vault_delivery') {
-          setResults((prev) => ({ ...prev, [assetKey]: { phase: 'review', message: 'Awaiting operator delivery.' } }));
+          // A still-locked vault lands here — show its calm unlock-date copy
+          // rather than a bare "awaiting operator" note.
+          setResults((prev) => ({
+            ...prev,
+            [assetKey]: lockedMessage
+              ? { phase: 'review', locked: true, message: lockedMessage }
+              : { phase: 'review', message: 'Awaiting operator delivery.' },
+          }));
           break;
         }
         // still verified / dispatching -> keep "Settling…" and poll again.
@@ -382,7 +435,24 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             setResults((prev) => ({ ...prev, [asset.assetKey]: { phase, message } })),
         });
         const tx = status.txSignatures[0];
-        if (status.status === 'confirmed' || status.status === 'verified' || status.status === 'dispatching') {
+        const terminalBad =
+          status.status === 'failed' ||
+          status.status === 'rejected' ||
+          status.status === 'expired';
+        if (isVaultLocked(asset) && !terminalBad && status.status !== 'confirmed') {
+          // A still-time-locked vault does NOT dispense now: the service queues
+          // it for automatic delivery to the destination at unlock. Show the
+          // calm locked-vault outcome immediately (the client already knows the
+          // unlock time from vaultEndTimestamp — no need to wait on the worker).
+          // Still poll as a backstop so that, in the edge case where the service
+          // settles it liquid instead, the badge flips to Confirmed.
+          const message = lockedVaultMessage(asset, claimantTrim);
+          setResults((prev) => ({
+            ...prev,
+            [asset.assetKey]: { phase: 'review', locked: true, message },
+          }));
+          pollToConfirmation(asset.assetKey, status.claimId, message);
+        } else if (status.status === 'confirmed' || status.status === 'verified' || status.status === 'dispatching') {
           const settling = status.status !== 'confirmed';
           setResults((prev) => ({
             ...prev,
@@ -396,18 +466,9 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
           // badge updates to Confirmed (+ View) without a manual refresh.
           if (settling) pollToConfirmation(asset.assetKey, status.claimId);
         } else if (status.status === 'pending_review') {
-          // A still-locked vault isn't "under review" — it's delivered when it
-          // unlocks. vaultEndTimestamp is epoch milliseconds (matches the
-          // claims service, which compares it against Date.now()).
-          const message =
-            asset.assetType === 'vault' && asset.vaultEndTimestamp
-              ? `Still time-locked — delivered when it unlocks on ${new Date(
-                  asset.vaultEndTimestamp,
-                ).toLocaleString()}.`
-              : 'Submitted for review.';
           setResults((prev) => ({
             ...prev,
-            [asset.assetKey]: { phase: 'review', message },
+            [asset.assetKey]: { phase: 'review', message: 'Submitted for review.' },
           }));
         } else {
           setResults((prev) => ({
@@ -574,6 +635,11 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
                       {' · '}
                       {a.assetKey.slice(0, 10)}…{a.assetKey.slice(-4)}
                     </code>
+                    {!claimed && isVaultLocked(a) && (
+                      <span style={{ ...styles.badge, ...styles.badgeLocked }}>
+                        🔒 Locked until {formatUnlockDate(vaultUnlockMs(a)!)}
+                      </span>
+                    )}
                     {claimed ? (
                       <ClaimedBadge tx={a.claimTx} />
                     ) : (
@@ -792,6 +858,15 @@ function ResultBadge({ result }: { result: ItemResult }) {
     );
   }
   if (result.phase === 'review') {
+    // A still-time-locked vault is a calm, expected outcome (not an error and
+    // not "under review") — render it as a lock note that wraps to full width.
+    if (result.locked) {
+      return (
+        <span style={{ ...styles.badge, ...styles.badgeLocked, ...styles.badgeBlock }}>
+          🔒 {result.message}
+        </span>
+      );
+    }
     return <span style={{ ...styles.badge, ...styles.badgePending }}>⏳ {result.message}</span>;
   }
   if (result.phase === 'error') {
@@ -944,6 +1019,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
   },
   badgePending: { background: brand.cardSurface, color: brand.textSecondary },
+  // Time-locked vault: calm amber note (distinct from success green / error red).
+  badgeLocked: { background: brand.warningBg, color: brand.warning },
+  // Let a longer locked-vault result sentence wrap to the card width.
+  badgeBlock: {
+    display: 'flex',
+    whiteSpace: 'normal' as const,
+    maxWidth: '100%',
+    lineHeight: 1.5,
+    textAlign: 'left' as const,
+  },
   badgeSuccess: { background: brand.successBg, color: brand.success },
   badgeError: { background: brand.errorBg, color: brand.error },
   badgeLink: { color: brand.primary, textDecoration: 'none', fontWeight: 700 },
