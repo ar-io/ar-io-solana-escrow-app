@@ -155,7 +155,7 @@ export function App() {
   const isDesktop = useMediaQuery('(min-width: 480px)');
   const mainNav = [
     ['#/claim', 'claim', 'Claim'],
-    ['https://ar.io/solana-migration/ar.io', 'more-info', 'More Info'],
+    ['https://ar.io/solana-migration/', 'more-info', 'More Info'],
   ] as const;
 
   useEffect(() => {
@@ -200,7 +200,6 @@ export function App() {
             <header className="app-header" style={styles.header}>
               <a href="#/" style={styles.logoLink}>
                 <ArioLogo />
-                <span style={styles.badge}>Claims</span>
               </a>
               <div style={styles.headerRight}>
                 <NetworkBadge />
@@ -335,6 +334,15 @@ export function App() {
                 style={styles.footerLink}
               >
                 ar.io
+              </a>
+              <span style={styles.footerDot}>&middot;</span>
+              <a
+                href="https://ar.io/legal/terms-of-service-and-privacy-policy/"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={styles.footerLink}
+              >
+                Terms &amp; Privacy
               </a>
               <span style={styles.footerDot}>&middot;</span>
               <span style={styles.footerVersion}>
