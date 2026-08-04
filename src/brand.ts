@@ -6,9 +6,9 @@ export const brand = {
   black: '#23232D',
   white: '#FFFFFF',
   cardSurface: '#F0F0F0',
-  textSecondary: '#6B6B78',
+  textSecondary: '#4A4A58', // brand kit "Body Gray" — long-form copy
   textTertiary: '#9E9EA8',
-  border: '#E0E0E4',
+  border: '#E6E4EF', // brand kit "Subtle Border" — dividers/borders
   success: '#1A8754',
   successBg: '#EDFAF3',
   warning: '#B07000',

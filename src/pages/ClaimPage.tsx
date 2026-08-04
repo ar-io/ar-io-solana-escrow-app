@@ -538,17 +538,13 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
     <div style={styles.wrap}>
       <h1 className="page-title" style={styles.h1}>Claim your assets</h1>
       <p style={styles.lede}>
-        Someone set aside ANTs or ARIO tokens for you. Connect the Arweave or
-        Ethereum wallet they were addressed to, pick the assets to claim, and
-        we'll deliver them to any Solana wallet you choose. Have a claim link?
-        You can also enter the identifier manually in step 1.
+        Connect your wallet to verify and claim your assets.
       </p>
 
       {/* ---- Step 1: find assets ---- */}
       <StepCard n={1} title="Find your assets" completed={items.length > 0}>
         <p style={styles.hint}>
-          Connect the Arweave or Ethereum wallet your assets were addressed to,
-          and we'll find everything waiting for you to claim.
+          Connect the Arweave or Ethereum wallet your assets were sent to.
         </p>
 
         <div style={styles.connectStack}>
@@ -682,9 +678,8 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         active={items.length > 0}
       >
         <p style={{ ...styles.hint, marginTop: 0, marginBottom: '12px' }}>
-          This destination is independent of the wallet you prove ownership with —
-          you can reuse the same Solana address across your Arweave and Ethereum
-          claims.
+          Where your claimed assets get delivered. Paste any Solana address or
+          connect a wallet — it doesn't need to match the wallet you're claiming with.
         </p>
         <input
           type="text"
@@ -719,12 +714,8 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             Use connected wallet ({publicKey.toBase58().slice(0, 4)}…{publicKey.toBase58().slice(-4)})
           </button>
         )}
-        <p style={styles.hint}>
-          The Solana wallet that will receive every asset you claim
-          {publicKey ? ' — pre-filled from your connected wallet' : ''}. This
-          address is locked into each signature — no one can redirect it.
-          Connecting a Solana wallet is optional; you can also just paste an
-          address.
+        <p style={styles.subtleNote}>
+          Locked into every signature — it can't be changed after you sign.
         </p>
       </StepCard>
 
@@ -760,11 +751,12 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         ) : (
           <>
             <p style={styles.hint}>
-              You'll approve each asset in your{' '}
+              Approve each claim in your{' '}
               {connectedProtocol ? protocolLabel[connectedProtocol] : ''} wallet
-              ({selected.length} signature{selected.length === 1 ? '' : 's'}) — every
-              asset is authorized separately. Before each signature we re-verify the
-              message binds this exact asset and your destination wallet.
+              ({selected.length} signature{selected.length === 1 ? '' : 's'}).
+            </p>
+            <p style={styles.subtleNote}>
+              Each signature is re-checked against the exact asset and destination.
             </p>
             <button
               type="button"
@@ -892,7 +884,7 @@ const styles: Record<string, React.CSSProperties> = {
   h1: {
     fontFamily: "'Besley', Georgia, serif",
     fontSize: '40px',
-    fontWeight: 700,
+    fontWeight: 800, // brand kit heading weight
     color: brand.black,
     lineHeight: 1.15,
     margin: 0,
@@ -928,6 +920,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: brand.textTertiary,
     margin: '8px 0 0',
   },
+  // Secondary trust note — lighter/smaller than a hint (security reassurance).
+  subtleNote: {
+    fontFamily: "'Plus Jakarta Sans', sans-serif",
+    fontSize: '12px',
+    color: brand.textTertiary,
+    margin: '6px 0 0',
+  },
   successHint: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
     fontSize: '13px',
@@ -950,10 +949,10 @@ const styles: Record<string, React.CSSProperties> = {
   discoverySection: { marginTop: '16px' },
   discoveryLoading: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
-    fontSize: '13px',
-    color: brand.textTertiary,
+    fontSize: '14px',
+    color: brand.textSecondary,
     margin: 0,
-    fontStyle: 'italic' as const,
+    fontWeight: 700,
   },
   discoveryError: {
     fontFamily: "'Plus Jakarta Sans', sans-serif",
