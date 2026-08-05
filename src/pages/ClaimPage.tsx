@@ -8,6 +8,7 @@ import React, {
 import { useWallet } from '@solana/wallet-adapter-react';
 import { brand } from '../brand.js';
 import { StepCard } from '../components/StepCard.tsx';
+import { ShareOnX } from '../components/ShareOnX.tsx';
 import { SolanaWalletConnect } from '../components/SolanaWalletConnect.tsx';
 import { ArweaveWalletConnect } from '../components/ArweaveWalletConnect.tsx';
 import { EthereumWalletConnect } from '../components/EthereumWalletConnect.tsx';
@@ -64,6 +65,24 @@ function assetLabel(a: ClaimableAssetView): string {
   }
   const amount = a.amount ? formatMarioToArio(BigInt(a.amount)) : '?';
   return a.assetType === 'vault' ? `${amount} ARIO vault` : `${amount} ARIO`;
+}
+
+/** Pre-filled X/Twitter share for a completed claim. Audience = people who MISSED
+ *  the initial ar.io Solana migration; the CTA is that their assets are STILL
+ *  claimable here (not "register" — that window closed). ArNS names lead (most
+ *  shareable). `url` (the claim app) becomes the card; the name is auto-linked in
+ *  the text. `\n` renders as a line break in the tweet. */
+const CLAIM_URL = 'https://sol.ar.io';
+function buildShareContent(assets: ClaimableAssetView[]): { text: string; url: string } {
+  const names = assets.filter((a) => a.assetType === 'ant' && a.name).map((a) => a.name as string);
+  const cta = 'Missed the @ar_io_network Solana migration? Your ar.io names & $ARIO are still claimable 👇';
+  if (names.length === 1) {
+    return { text: `Just claimed ${names[0]}.ar.io on Solana 🎉\n${cta}`, url: CLAIM_URL };
+  }
+  if (names.length > 1) {
+    return { text: `Just claimed my ar.io names on Solana 🎉\n${cta}`, url: CLAIM_URL };
+  }
+  return { text: `Just claimed my $ARIO on Solana 🎉\n${cta}`, url: CLAIM_URL };
 }
 function assetKindLabel(a: ClaimableAssetView): string {
   return a.assetType === 'ant' ? 'ANT' : a.assetType === 'vault' ? 'Vault' : 'ARIO';
@@ -736,6 +755,9 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             <p style={styles.successHint}>
               All {selected.length} claimed 🎉
             </p>
+            <div style={{ margin: '4px 0 14px' }}>
+              <ShareOnX {...buildShareContent(selected)} />
+            </div>
             {settlingCount > 0 && (
               <p style={styles.hint}>
                 Finishing on-chain settlement for {settlingCount} — your assets are on
