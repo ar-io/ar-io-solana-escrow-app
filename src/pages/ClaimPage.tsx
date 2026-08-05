@@ -468,7 +468,10 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
         } else if (status.status === 'pending_review') {
           setResults((prev) => ({
             ...prev,
-            [asset.assetKey]: { phase: 'review', message: 'Submitted for review.' },
+            [asset.assetKey]: {
+              phase: 'review',
+              message: 'Submitted for review — approvals can take up to 72 hours. Your assets will be delivered to the Solana address you provided; no further action is needed.',
+            },
           }));
         } else {
           setResults((prev) => ({
@@ -757,6 +760,8 @@ export function ClaimPage({ antMint: initialAssetKey }: Props) {
             </p>
             <p style={styles.subtleNote}>
               Each signature is re-checked against the exact asset and destination.
+              After you sign, claims are reviewed before delivery — this can take up
+              to 72 hours, and your assets arrive automatically at the address above.
             </p>
             <button
               type="button"
