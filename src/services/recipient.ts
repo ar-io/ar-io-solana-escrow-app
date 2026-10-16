@@ -16,10 +16,47 @@
 /** RSA-4096 modulus length in bytes (an Arweave recipient identity). */
 export const ARWEAVE_MODULUS_LEN = 512;
 
+/**
+ * GraphQL endpoints tried in order, first usable answer wins.
+ *
+ * `arweave.net` leads because it indexes BUNDLED data items (AO process spawns
+ * via aoconnect, for instance) and returns an owner key for them. A wallet whose
+ * only footprint is AO activity — which is every wallet that only ever made an
+ * ANT — has no L1 transaction, and `turbo-gateway` answers such an owner query
+ * with the literal string `<not-found>` in place of the key.
+ *
+ * `arweave-search.goldsky.com` is deliberately absent: it answers with a 307 to
+ * `arweave.net/graphql` carrying no `access-control-allow-origin`, so a browser
+ * blocks the redirect. It succeeds under `curl -L`, which makes it look healthy
+ * from a terminal while never working for a real user.
+ */
 const ARWEAVE_GQL_ENDPOINTS = [
+  'https://arweave.net/graphql',
   'https://turbo-gateway.com/graphql',
-  'https://arweave-search.goldsky.com/graphql',
 ];
+
+/** Thrown when a gateway answered, but not with a usable RSA modulus. */
+const UNUSABLE_KEY = 'owner_key_unusable';
+/** Thrown when a gateway knows of no transaction for the address. */
+const NO_TRANSACTIONS = 'no_transactions';
+
+/**
+ * True if `key` could be a base64url RSA-4096 modulus.
+ *
+ * Gateways signal "I have no key for this owner" with a sentinel rather than a
+ * null — `turbo-gateway` uses `<not-found>`. A sentinel is truthy, so it slips
+ * past a bare presence check and then explodes inside `atob` as
+ * `InvalidCharacterError`, which surfaces to the user as an unreadable failure
+ * instead of falling through to a gateway that has the key.
+ */
+function isPlausibleModulus(key: string): boolean {
+  if (!/^[A-Za-z0-9_-]+$/.test(key)) return false;
+  try {
+    return base64urlToBytes(key).length === ARWEAVE_MODULUS_LEN;
+  } catch {
+    return false;
+  }
+}
 
 /** Detect a 43-char base64url Arweave address. */
 export function isArweaveAddress(input: string): boolean {
@@ -36,9 +73,12 @@ async function queryOwnerKey(endpoint: string, addr: string): Promise<string> {
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const json = await response.json();
   const edges = json?.data?.transactions?.edges;
-  if (!edges || edges.length === 0) throw new Error('no_transactions');
+  if (!edges || edges.length === 0) throw new Error(NO_TRANSACTIONS);
   const ownerKey: string | undefined = edges[0]?.node?.owner?.key;
-  if (!ownerKey) throw new Error('owner key missing from response');
+  if (!ownerKey) throw new Error(UNUSABLE_KEY);
+  // Validate the SHAPE before trusting it as a modulus, so a sentinel is treated
+  // as "this gateway does not have it" and the next gateway gets a turn.
+  if (!isPlausibleModulus(ownerKey)) throw new Error(UNUSABLE_KEY);
   return ownerKey;
 }
 
@@ -50,6 +90,10 @@ async function queryOwnerKey(endpoint: string, addr: string): Promise<string> {
 export async function lookupArweaveModulus(addrInput: string): Promise<string> {
   const addr = addrInput.trim();
   let lastError: Error | undefined;
+  let mismatch: Error | undefined;
+  // Every endpoint either had no record of the address or had no usable key for
+  // it. That is a different (and recoverable) story from "the gateways broke".
+  let allMissing = true;
 
   for (const endpoint of ARWEAVE_GQL_ENDPOINTS) {
     try {
@@ -60,19 +104,29 @@ export async function lookupArweaveModulus(addrInput: string): Promise<string> {
       );
       const derived = bytesToBase64url(hash);
       if (derived !== addr) {
-        throw new Error(
+        // Keep asking the others: one dishonest or buggy gateway must not deny
+        // the claim, but the mismatch is still reported if nobody gets it right.
+        mismatch = new Error(
           `GraphQL returned a modulus that does not match the address. ` +
             `Expected ${addr}, derived ${derived}. The gateway may be compromised.`,
         );
+        allMissing = false;
+        continue;
       }
       return modulus;
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));
-      if (lastError.message === 'no_transactions') break;
+      // A single gateway reporting "nothing here" is NOT authoritative: indexes
+      // differ, and a wallet whose only activity is bundled (AO) is absent from
+      // some of them entirely. Always let the remaining gateways answer.
+      if (lastError.message !== NO_TRANSACTIONS && lastError.message !== UNUSABLE_KEY) {
+        allMissing = false;
+      }
     }
   }
 
-  if (lastError?.message === 'no_transactions') {
+  if (mismatch) throw mismatch;
+  if (allMissing) {
     throw new Error(
       'Could not find a public key for this Arweave address. The address may ' +
         'have no on-chain transactions yet — send one and try again.',
